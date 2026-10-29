@@ -69,7 +69,7 @@ const truckOf = (id) => S.trucks.find((t) => t.id === id);
 const tripOf = (id) => S.trips.find((t) => t.id === id);
 const shipOf = (id) => S.shipments.find((s) => s.id === id);
 const qtyOf = (s) => (s.shipment_items || []).reduce((a, i) => a + Number(i.qty || 0), 0);
-const itemsText = (s) => (s.shipment_items || []).map((i) => `${qtyFmt(i.qty)} ${i.unit} ${i.description}`).join(', ');
+const itemsText = (s) => (s.shipment_items || []).map((i) => `${qtyFmt(i.qty)} ${i.unit} ${i.description}${i.size_package ? ` (${i.size_package})` : ''}`).join(', ');
 const statusPill = (code) => pill(...(STATUS[code] || [code, 'gray']));
 const manilaDate = (iso) => iso ? new Date(iso).toLocaleDateString('en-CA', { timeZone: TZ }) : '';
 const monthStart = (offset = 0) => { const [y, m] = todayISO().split('-').map(Number); const d = new Date(Date.UTC(y, m - 1 + offset, 1)); return d.toISOString().slice(0, 10); };
@@ -627,10 +627,26 @@ const crewList = (id, role) => `<datalist id="${id}">${S.crew.filter((c) => c.ac
 const cancelBtn = '<button type="button" class="btn" data-act="closeModal">Cancel</button>';
 
 function itemRow(i = {}) {
-  return `<div class="irow"><input name="idesc" placeholder="Item description" value="${esc(i.description || '')}" aria-label="Item description">
-    <input name="iqty" type="number" min="0.01" step="any" placeholder="Qty" value="${esc(i.qty ?? '')}" aria-label="Quantity">
-    <select name="iunit" aria-label="Unit">${UNITS.map((u) => `<option ${u === (i.unit || 'pc') ? 'selected' : ''}>${u}</option>`).join('')}</select>
-    <button type="button" class="iconbtn" data-act="rmItem" aria-label="Remove item">${ICON.x}</button></div>`;
+  const amt = Number(i.qty || 0) * Number(i.rate || 0);
+  return `<div class="irow"><input class="i-desc" name="idesc" placeholder="Item description" value="${esc(i.description || '')}" aria-label="Item description">
+    <input class="i-size" name="isize" placeholder="Size / package" value="${esc(i.size_package || '')}" aria-label="Size or package">
+    <input class="i-qty" name="iqty" type="number" min="0.01" step="any" placeholder="Qty" value="${esc(i.qty ?? '')}" aria-label="Quantity">
+    <select class="i-unit" name="iunit" aria-label="Unit">${UNITS.map((u) => `<option ${u === (i.unit || 'pc') ? 'selected' : ''}>${u}</option>`).join('')}</select>
+    <input class="i-rate" name="irate" type="number" min="0" step="0.01" placeholder="Rate ₱" value="${esc(i.rate ?? '')}" aria-label="Rate per unit in pesos">
+    <output class="i-amt" aria-label="Line amount">${peso(amt)}</output>
+    <button type="button" class="iconbtn i-rm" data-act="rmItem" aria-label="Remove item">${ICON.x}</button></div>`;
+}
+// live totals in the cargo form
+function recalcFreight() {
+  const form = $('form[data-form="shipment"]'); if (!form) return;
+  let sum = 0;
+  $$('#items .irow', form).forEach((r) => {
+    const a = Number($('.i-qty', r).value || 0) * Number($('.i-rate', r).value || 0);
+    sum += a; $('.i-amt', r).textContent = peso(a);
+  });
+  const other = Number($('#sh-other', form)?.value || 0);
+  $('#frt-items').textContent = peso(sum);
+  $('#frt-total').textContent = peso(sum + other);
 }
 
 function shipmentForm(s) {
@@ -649,15 +665,24 @@ function shipmentForm(s) {
     </div>
     <div class="fgrid">
       <label class="f">Destination <span class="req">*</span><select id="sh-dest" name="destination">${dests.map((d) => `<option ${d === (s?.destination || finalStop()) ? 'selected' : ''}>${esc(d)}</option>`).join('')}</select></label>
-      <label class="f">Freight charge (₱) <span class="req">*</span><input id="sh-freight" name="freight_charge" type="number" min="0" step="0.01" value="${esc(s?.freight_charge ?? '')}"></label>
       <label class="f">Payment<select id="sh-pay" name="payment_terms">${['Prepaid', 'Collect'].map((p) => `<option value="${p}" ${p === (s?.payment_terms || 'Prepaid') ? 'selected' : ''}>${p === 'Collect' ? 'Collect on delivery' : 'Prepaid at Manila'}</option>`).join('')}</select></label>
       <label class="f">Declared value (₱)<input id="sh-decl" name="declared_value" type="number" min="0" step="0.01" value="${esc(s?.declared_value ?? '')}"></label>
     </div>
-    <div style="display:grid;gap:8px"><h3>Items</h3><div id="items" style="display:grid;gap:8px">${(s?.shipment_items?.length ? s.shipment_items : [{}]).map(itemRow).join('')}</div>
-      <div><button type="button" class="btn sm" data-act="addItem">${ICON.plus} Add item</button></div></div>
+    <div style="display:grid;gap:8px"><div><h3>Items and freight</h3><p class="muted small" style="margin:2px 0 0">Charge each line by its own size or package: amount = qty × rate.</p></div>
+      <div class="irow ihead" aria-hidden="true"><span>Item</span><span>Size / package</span><span class="num">Qty</span><span>Unit</span><span class="num">Rate (₱)</span><span class="num">Amount</span><span></span></div>
+      <div id="items" style="display:grid;gap:8px">${(s?.shipment_items?.length ? s.shipment_items : [{}]).map(itemRow).join('')}</div>
+      <div><button type="button" class="btn sm" data-act="addItem">${ICON.plus} Add item</button></div>
+      <div class="freight-box">
+        <div class="fgrid">
+          <label class="f">Other charges (₱)<input id="sh-other" name="other_charges" type="number" min="0" step="0.01" value="${esc(s?.other_charges || '')}" placeholder="0.00"></label>
+          <label class="f">What for<input id="sh-other-note" name="other_charges_note" value="${esc(s?.other_charges_note || '')}" placeholder="e.g. handling, delivery fee"></label>
+        </div>
+        <dl class="totals"><div><dt>Items</dt><dd id="frt-items">₱0.00</dd></div><div class="grand"><dt>Total freight</dt><dd id="frt-total">₱0.00</dd></div></dl>
+      </div></div>
     <label class="f">Notes<textarea id="sh-notes" name="notes" placeholder="Handling instructions, fragile, etc.">${esc(s?.notes || '')}</textarea></label>`,
     foot: `${cancelBtn}<button class="btn primary" type="submit">${s ? 'Save changes' : 'Register shipment'}</button>`,
   });
+  recalcFreight();
 }
 
 async function openShipment(id) {
@@ -684,9 +709,10 @@ async function openShipment(id) {
         ['Registered', `${fDT(s.created_at)}<br><span class="muted small">by ${esc(personName(s.created_by))}</span>`],
         trip && ['Trip', `<span class="mono">${esc(trip.trip_no)}</span> · ${esc(truckOf(trip.truck_id)?.code || '')}<br><span class="muted small">${esc(trip.driver)}</span>`],
       ])}
-      <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Item</th><th class="num">Qty</th><th>Unit</th></tr></thead><tbody>
-        ${(s.shipment_items || []).map((i) => `<tr><td>${esc(i.description)}</td><td class="num">${qtyFmt(i.qty)}</td><td>${esc(i.unit)}</td></tr>`).join('')}
-        <tr><td><strong>Total</strong></td><td class="num"><strong>${qtyFmt(qtyOf(s))}</strong></td><td></td></tr></tbody></table></div>
+      <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Item</th><th>Size / package</th><th class="num">Qty</th><th>Unit</th><th class="num">Rate</th><th class="num">Amount</th></tr></thead><tbody>
+        ${(s.shipment_items || []).map((i) => `<tr><td>${esc(i.description)}</td><td>${esc(i.size_package || '')}</td><td class="num">${qtyFmt(i.qty)}</td><td>${esc(i.unit)}</td><td class="num">${peso(i.rate)}</td><td class="num">${peso(i.amount ?? i.qty * i.rate)}</td></tr>`).join('')}
+        ${Number(s.other_charges) ? `<tr><td colspan="5">Other charges${s.other_charges_note ? ` · ${esc(s.other_charges_note)}` : ''}</td><td class="num">${peso(s.other_charges)}</td></tr>` : ''}
+        <tr><td colspan="2"><strong>Total</strong></td><td class="num"><strong>${qtyFmt(qtyOf(s))}</strong></td><td></td><td></td><td class="num"><strong>${peso(s.freight_charge)}</strong></td></tr></tbody></table></div>
       ${s.notes ? `<p style="margin:0"><strong>Notes:</strong> ${esc(s.notes)}</p>` : ''}
       ${s.released_at ? sec('Released en route', [['Stop', esc(s.destination)], ['Qty released', qtyFmt(s.release_qty)], ['Received by', `${esc(s.release_received_by)}<br><span class="muted small">${esc(s.release_id_ref || '')}</span>`], ['Condition', esc(s.release_condition)], ['When', `${fDT(s.released_at)}<br><span class="muted small">by ${esc(personName(s.released_by))}</span>`], s.release_note && ['Note', esc(s.release_note)]]) : ''}
       ${s.received_at ? sec(`Received in ${esc(finalStop())}`, [['Qty received', qtyFmt(s.received_qty)], ['Condition', esc(s.received_condition)], ['Bay', esc(s.warehouse_bay || '—')], ['When', `${fDT(s.received_at)}<br><span class="muted small">by ${esc(personName(s.received_by))}</span>`], s.receiving_note && ['Note', esc(s.receiving_note)]]) : ''}
@@ -861,8 +887,8 @@ const ACT = {
   newShipment: () => shipmentForm(null),
   editShipment: (d) => shipmentForm(shipOf(d.id)),
   openShipment: (d) => openShipment(d.id),
-  addItem: () => $('#items').insertAdjacentHTML('beforeend', itemRow()),
-  rmItem: (d, b) => { if ($$('#items .irow').length > 1) b.closest('.irow').remove(); },
+  addItem: () => { $('#items').insertAdjacentHTML('beforeend', itemRow()); $$('#items .i-desc').pop()?.focus(); },
+  rmItem: (d, b) => { if ($$('#items .irow').length > 1) { b.closest('.irow').remove(); recalcFreight(); } },
   delShipment: async (d) => after(await run(sb.from('shipments').delete().eq('id', d.id), 'Shipment deleted')),
   markPaid: async (d) => { if (await after(await run(sb.from('shipments').update({ paid: true, paid_at: new Date().toISOString() }).eq('id', d.id), 'Marked as paid'))) S.report.period = null; },
   newTrip: tripForm,
@@ -927,14 +953,17 @@ const txt = (fd, k) => String(fd.get(k) || '').trim() || null;
 
 const FORMS = {
   shipment: async (f, fd) => {
-    if (!need(fd, [['shipper_name', 'shipper'], ['consignee_name', 'consignee'], ['freight_charge', 'freight charge']])) return;
-    const descs = fd.getAll('idesc'); const qtys = fd.getAll('iqty'); const units = fd.getAll('iunit');
-    const items = descs.map((d, i) => ({ description: d.trim(), qty: Number(qtys[i]), unit: units[i] })).filter((i) => i.description || i.qty);
+    if (!need(fd, [['shipper_name', 'shipper'], ['consignee_name', 'consignee']])) return;
+    const descs = fd.getAll('idesc'); const qtys = fd.getAll('iqty'); const units = fd.getAll('iunit'); const sizes = fd.getAll('isize'); const rates = fd.getAll('irate');
+    const items = descs.map((d, i) => ({ description: d.trim(), size_package: sizes[i].trim() || null, qty: Number(qtys[i]), unit: units[i], rate: Number(rates[i] || 0) })).filter((i) => i.description || i.qty);
     if (!items.length || items.some((i) => !i.description || !(i.qty > 0))) { toast('Each item needs a description and a quantity above zero.', 'err'); return; }
+    if (items.some((i) => !(i.rate >= 0))) { toast('Rates cannot be negative.', 'err'); return; }
+    const other = Number(fd.get('other_charges') || 0);
+    if (!items.some((i) => i.rate > 0) && !(other > 0)) { toast('Enter a rate for at least one item, or other charges.', 'err'); return; }
     const row = {
       shipper_name: txt(fd, 'shipper_name'), shipper_contact: txt(fd, 'shipper_contact'),
       consignee_name: txt(fd, 'consignee_name'), consignee_contact: txt(fd, 'consignee_contact'), consignee_address: txt(fd, 'consignee_address'),
-      destination: fd.get('destination'), freight_charge: Number(fd.get('freight_charge')), declared_value: numOrNull(fd.get('declared_value')),
+      destination: fd.get('destination'), other_charges: other, other_charges_note: txt(fd, 'other_charges_note'), declared_value: numOrNull(fd.get('declared_value')),
       payment_terms: fd.get('payment_terms'), paid: fd.get('payment_terms') === 'Prepaid', notes: txt(fd, 'notes'),
     };
     let id = f.dataset.id;
@@ -1091,7 +1120,7 @@ function exportCSV(kind) {
   const tag = `${r.from}_to_${r.to}`;
   const tn = (id) => truckOf(id)?.code || '';
   if (kind === 'shipments') downloadCSV(`cj-shipments_${tag}.csv`, [
-    ['Tracking no', 'Registered', 'Shipper', 'Shipper contact', 'Consignee', 'Consignee contact', 'Address', 'Destination', 'Items', 'Total qty', 'Freight', 'Payment', 'Paid', 'Status', 'Trip', 'Received qty', 'Received by (POD)', 'Delivered/released'],
+    ['Tracking no', 'Registered', 'Shipper', 'Shipper contact', 'Consignee', 'Consignee contact', 'Address', 'Destination', 'Items', 'Total qty', 'Total freight', 'Payment', 'Paid', 'Status', 'Trip', 'Received qty', 'Received by (POD)', 'Delivered/released'],
     ...r.shipments.map((s) => [s.tracking_no, fDT(s.created_at), s.shipper_name, s.shipper_contact, s.consignee_name, s.consignee_contact, s.consignee_address, s.destination, itemsText(s), qtyOf(s), s.freight_charge, s.payment_terms, s.paid ? 'Yes' : 'No', STATUS[s.status]?.[0], tripOf(s.trip_id)?.trip_no || '', s.received_qty ?? s.release_qty ?? '', s.pod_received_by || s.release_received_by || '', fDT(s.delivered_at || s.released_at)]),
   ]);
   if (kind === 'trips') downloadCSV(`cj-trips_${tag}.csv`, [
@@ -1183,7 +1212,10 @@ document.addEventListener('submit', async (e) => {
   finally { if (btn && document.contains(btn)) btn.disabled = false; }
 });
 document.addEventListener('change', (e) => { const el = e.target.closest('[data-chg]'); if (el) CHG[el.dataset.chg]?.(el); });
-document.addEventListener('input', (e) => { const el = e.target.closest('[data-filter]'); if (el) { S.ui[el.dataset.filter] = el.value; render(); } });
+document.addEventListener('input', (e) => {
+  if (e.target.closest('form[data-form="shipment"]')) { recalcFreight(); return; }
+  const el = e.target.closest('[data-filter]'); if (el) { S.ui[el.dataset.filter] = el.value; render(); }
+});
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && modalOpen()) closeModal(); });
 $('#modal-root').addEventListener('click', (e) => { if (e.target.classList.contains('overlay')) closeModal(); });
 window.addEventListener('hashchange', () => { closeModal(); render(); window.scrollTo(0, 0); });

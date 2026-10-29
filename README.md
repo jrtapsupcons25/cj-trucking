@@ -14,6 +14,10 @@ Web app for CJ Trucking Services' Manila → Vigan freight operations. Managed b
 4. **Create the administrator.** Open the website and use **New staff account**. The very first account automatically becomes the administrator.
 5. **Add staff.** Each staff member creates an account on the sign-in page, then the administrator assigns a role under **Users & settings**.
 
+**Database updates.** If your database was set up before an update, run the matching file once in the SQL Editor:
+
+- [`supabase/002_item_rates.sql`](supabase/002_item_rates.sql) — freight charged per item / per box (size or package and rate on each item line).
+
 Optional: to skip email confirmation for new accounts, turn off **Authentication → Providers → Email → Confirm email** in Supabase.
 
 ## Roles
