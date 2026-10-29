@@ -170,7 +170,7 @@ function shell() {
   }).join('');
   return `<div class="app">
     <aside class="side">
-      <a class="brand" href="#dashboard"><span class="mark">CJ</span><span><span class="brand-name">CJ TRUCKING</span><br><span class="brand-sub">Services · Manila–Vigan</span></span></a>
+      <a class="brand" href="#dashboard"><span class="mark">CJ</span><span><span class="brand-name">CJ TRUCKING</span><br><span class="brand-sub">Manila – Vigan</span></span></a>
       <nav class="nav" aria-label="Main">${links}</nav>
       <div class="side-foot">
         <div class="managed">Managed by<strong>Emilia Rabara</strong></div>
