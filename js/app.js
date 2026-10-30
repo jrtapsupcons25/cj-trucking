@@ -11,15 +11,16 @@ import {
 // ---------------------------------------------------------------------------
 const STATUS = {
   REG: ['Registered', 'gray'], LOAD: ['Loaded', 'gold'], TRANSIT: ['In transit', 'blue'],
-  RELEASED: ['Released en route', 'green'], RECEIVED: ['In Vigan warehouse', 'navy'],
+  RELEASED: ['Released en route', 'green'], RECEIVED: ['In warehouse', 'navy'],
   OUT: ['Out for delivery', 'orange'], DELIVERED: ['Delivered', 'green'], PICKUP: ['Picked up', 'green'],
 };
 const DONE = ['RELEASED', 'DELIVERED', 'PICKUP'];
-const TRIP_TONE = { 'Loading': 'gold', 'On the road': 'blue', 'At Vigan': 'navy', 'Closed': 'gray' };
+const TRIP_TONE = { 'Loading': 'gold', 'On the road': 'blue', 'Arrived': 'navy', 'Closed': 'gray' };
+const DIRS = ['northbound', 'southbound'];
 const UNITS = ['pc', 'box', 'carton', 'sack', 'bag', 'bundle', 'roll', 'pail', 'drum', 'crate', 'pallet', 'set'];
 const ROLES = {
-  admin: 'Administrator', manager: 'Operations manager', dispatcher: 'Dispatcher (Manila)',
-  receiver: 'Receiver (Vigan)', delivery: 'Delivery', accounting: 'Accounting', viewer: 'Viewer', pending: 'Pending approval',
+  admin: 'Administrator', manager: 'Operations manager', dispatcher: 'Dispatcher',
+  receiver: 'Receiver', delivery: 'Delivery', accounting: 'Accounting', viewer: 'Viewer', pending: 'Pending approval',
 };
 const CAN = {
   register: ['admin', 'manager', 'dispatcher'],
@@ -39,7 +40,7 @@ const NAV = [
   { id: 'shipments', label: 'Shipments', group: 'Freight flow' },
   { id: 'dispatch', label: 'Dispatch & loading', group: 'Freight flow' },
   { id: 'unloading', label: 'En-route releases', group: 'Freight flow' },
-  { id: 'receiving', label: 'Vigan receiving', group: 'Freight flow' },
+  { id: 'receiving', label: 'Receiving', group: 'Freight flow' },
   { id: 'delivery', label: 'Delivery', group: 'Freight flow' },
   { id: 'fleet', label: 'Fleet', group: 'Management' },
   { id: 'reports', label: 'Reports', group: 'Management' },
@@ -54,9 +55,11 @@ const S = {
   profiles: [], trucks: [], crew: [], stops: [], bays: [], vehicles: [],
   trips: [], shipments: [], issues: [], maint: [],
   loaded: false, loading: false, loadError: '',
-  ui: { q: '', status: 'active', period: 'month' },
+  ui: { q: '', status: 'active', dir: 'all', period: 'month', lastDir: '' },
   report: { period: null, data: null, loading: false },
 };
+
+try { S.ui.lastDir = localStorage.getItem('cj.lastDir') || ''; } catch { /* storage blocked */ }
 
 const cfg = window.CJ_CONFIG || {};
 const configured = /^https:\/\/.+/.test(cfg.SUPABASE_URL || '') && cfg.SUPABASE_KEY && !/PASTE_/.test(cfg.SUPABASE_KEY);
@@ -73,17 +76,37 @@ const itemsText = (s) => (s.shipment_items || []).map((i) => `${qtyFmt(i.qty)} $
 const statusPill = (code) => pill(...(STATUS[code] || [code, 'gray']));
 const manilaDate = (iso) => iso ? new Date(iso).toLocaleDateString('en-CA', { timeZone: TZ }) : '';
 const monthStart = (offset = 0) => { const [y, m] = todayISO().split('-').map(Number); const d = new Date(Date.UTC(y, m - 1 + offset, 1)); return d.toISOString().slice(0, 10); };
-const originStop = () => S.stops.find((s) => s.kind === 'origin')?.name || 'Manila';
-const finalStop = () => S.stops.find((s) => s.kind === 'final')?.name || 'Vigan';
-const stopNames = () => S.stops.map((s) => s.name);
-const manifest = (tripId) => S.shipments.filter((s) => s.trip_id === tripId);
+// Direction helpers. Route stops are stored in Manila → Vigan order:
+// kind 'origin' = Manila, kind 'final' = Vigan. Northbound trips run them in order, southbound in reverse.
+const dirOf = (x) => (x && x.direction) || 'northbound';
+const terminalKind = (dir, which) => ((dir === 'southbound') === (which === 'start') ? 'final' : 'origin');
+const stopByKind = (k) => S.stops.find((x) => x.kind === k)?.name || (k === 'origin' ? 'Manila' : 'Vigan');
+const startOf = (dir) => stopByKind(terminalKind(dir, 'start'));
+const endOf = (dir) => stopByKind(terminalKind(dir, 'end'));
+const routeFor = (dir) => { const n = S.stops.map((x) => x.name); return dir === 'southbound' ? n.reverse() : n; };
+const dirLabel = (dir) => `${startOf(dir)} → ${endOf(dir)}`;
+const dirTag = (dir) => `<span class="dir${dir === 'southbound' ? ' s' : ''}">${esc(dirLabel(dir))}</span>`;
+const destOptions = (dir, cur) => routeFor(dir).slice(1).map((d) => `<option ${d === (cur || endOf(dir)) ? 'selected' : ''}>${esc(d)}</option>`).join('');
+const manifest = (tripId) => S.shipments.filter((x) => x.trip_id === tripId);
 const reachedIdx = (trip) => {
-  const names = stopNames();
-  if (trip.status === 'At Vigan' || trip.status === 'Closed') return names.length - 1;
+  const names = routeFor(dirOf(trip));
+  if (trip.status === 'Arrived' || trip.status === 'Closed') return names.length - 1;
   let idx = 0;
   (trip.trip_stop_logs || []).forEach((l) => { const i = names.indexOf(l.stop_name); if (i > idx) idx = i; });
   return idx;
 };
+const lastTrip = (truckId) => S.trips.filter((x) => x.truck_id === truckId).sort((a, b) => (b.created_at > a.created_at ? 1 : -1))[0];
+const truckWhere = (t) => {
+  const l = lastTrip(t.id);
+  if (!l) return 'location not recorded';
+  if (l.status === 'Loading') return `loading at ${startOf(dirOf(l))}`;
+  if (l.status === 'On the road') return 'on the road';
+  return `at ${endOf(dirOf(l))}`;
+};
+// A truck parked in Vigan most likely loads return cargo for Manila next.
+const suggestDir = (t) => { const l = lastTrip(t.id); return l && l.status !== 'Loading' && terminalKind(dirOf(l), 'end') === 'final' ? 'southbound' : 'northbound'; };
+const dirSelect = (id, name, cur, extra = '') => `<select id="${id}" name="${name}" ${extra}>${DIRS.map((d) => `<option value="${d}" ${d === cur ? 'selected' : ''}>${esc(dirLabel(d))}</option>`).join('')}</select>`;
+const termSelect = (id, cur = 'final') => `<label class="f">Terminal<select id="${id}" name="terminal">${['final', 'origin'].map((k) => `<option value="${k}" ${k === cur ? 'selected' : ''}>${esc(stopByKind(k))}</option>`).join('')}</select></label>`;
 const truckLabel = (t) => t ? `${t.code}${t.plate_no ? ' · ' + t.plate_no : ''}` : '—';
 
 function friendly(e) {
@@ -155,7 +178,7 @@ function navCounts() {
     shipments: S.shipments.filter((s) => s.status === 'REG').length,
     dispatch: S.trips.filter((t) => t.status === 'Loading').length,
     unloading: S.trips.filter((t) => t.status === 'On the road').length,
-    receiving: S.trips.filter((t) => t.status === 'At Vigan').length + S.issues.filter((i) => !i.resolved).length,
+    receiving: S.trips.filter((t) => t.status === 'Arrived').length + S.issues.filter((i) => !i.resolved).length,
     delivery: S.shipments.filter((s) => s.status === 'RECEIVED' || s.status === 'OUT').length,
     users: can('admin') ? S.profiles.filter((p) => p.role === 'pending').length : 0,
   };
@@ -206,7 +229,7 @@ function render() {
 const head = (eyebrow, title, desc, actions = '') => `<header class="pagehead"><div><div class="eyebrow">${esc(eyebrow)}</div><h1>${esc(title)}</h1>${desc ? `<p>${desc}</p>` : ''}</div>${actions ? `<div class="actions">${actions}</div>` : ''}</header>`;
 const empty = (title, text, action = '') => `<div class="empty"><strong>${esc(title)}</strong><span>${text}</span>${action}</div>`;
 const routeBar = (trip) => {
-  const idx = reachedIdx(trip); const names = stopNames();
+  const idx = reachedIdx(trip); const names = routeFor(dirOf(trip));
   const loading = trip.status === 'Loading';
   return `<div class="route" role="img" aria-label="Route progress: ${esc(loading ? 'loading at ' + names[0] : 'reached ' + names[idx])}">${names.map((n, i) => {
     const cls = i < idx ? 'done' : i === idx ? 'here' : '';
@@ -222,28 +245,30 @@ const VIEWS = {};
 VIEWS.dashboard = () => {
   const m0 = monthStart();
   const month = S.shipments.filter((s) => manilaDate(s.created_at) >= m0);
+  const monthN = month.filter((s) => dirOf(s) === 'northbound').length;
   const onRoad = S.trips.filter((t) => t.status === 'On the road');
   const loading = S.trips.filter((t) => t.status === 'Loading');
-  const atVigan = S.trips.filter((t) => t.status === 'At Vigan');
+  const arrived = S.trips.filter((t) => t.status === 'Arrived');
   const out = S.shipments.filter((s) => s.status === 'OUT');
   const inWh = S.shipments.filter((s) => s.status === 'RECEIVED');
   const completed = S.shipments.filter((s) => DONE.includes(s.status) && manilaDate(s.delivered_at || s.released_at) >= m0);
-  const toReconcile = S.shipments.filter((s) => s.status === 'TRANSIT' && atVigan.some((t) => t.id === s.trip_id)).length;
+  const toReconcile = S.shipments.filter((s) => s.status === 'TRANSIT' && arrived.some((t) => t.id === s.trip_id)).length;
   const active = S.trips.filter((t) => t.status !== 'Closed');
+  const split = (list, which) => DIRS.map((d) => `${esc(stopByKind(terminalKind(d, which)))} ${list.filter((t) => dirOf(t) === d).length}`).join(' · ');
 
   const kpi = (href, label, val, sub, hl = false) => `<a class="kpi${hl ? ' hl' : ''}" href="#${href}"><span class="k-label">${label}</span><span class="k-val">${val}</span><span class="k-sub">${sub}</span></a>`;
   const kpis = `<section class="kpis" aria-label="Today at a glance">
-    ${kpi('shipments', 'Shipments this month', month.length, `${qtyFmt(month.reduce((a, s) => a + qtyOf(s), 0))} pcs · ${peso(month.reduce((a, s) => a + Number(s.freight_charge), 0))}`)}
+    ${kpi('shipments', 'Shipments this month', month.length, `${monthN} to ${esc(endOf('northbound'))} · ${month.length - monthN} to ${esc(endOf('southbound'))}<br>${peso(month.reduce((a, s) => a + Number(s.freight_charge), 0))} freight`)}
     ${kpi('fleet', 'Trucks on the road', `${onRoad.length}<small style="font-size:18px;opacity:.7"> / ${S.trucks.length}</small>`, onRoad.map((t) => truckOf(t.truck_id)?.code).join(', ') || 'All trucks parked', true)}
-    ${kpi('dispatch', 'Loading at Manila', loading.length, `${S.shipments.filter((s) => s.status === 'LOAD').length} shipments on manifests`)}
-    ${kpi('receiving', 'Unloading at Vigan', atVigan.length, `${toReconcile} awaiting reconciliation`)}
-    ${kpi('delivery', 'Out for delivery', out.length, `${inWh.length} waiting in warehouse`)}
+    ${kpi('dispatch', 'Loading', loading.length, `At ${split(loading, 'start')}`)}
+    ${kpi('receiving', 'Arrived, unloading', arrived.length, `${split(arrived, 'end')} · ${toReconcile} to reconcile`)}
+    ${kpi('delivery', 'Out for delivery', out.length, `${inWh.length} waiting in warehouses`)}
     ${kpi('reports', 'Completed releases', completed.length, `${completed.filter((s) => s.status === 'DELIVERED').length} delivered · ${completed.filter((s) => s.status === 'RELEASED').length} en route · ${completed.filter((s) => s.status === 'PICKUP').length} pickup`)}
   </section>`;
 
   const lanes = active.length ? active.map((t) => {
     const m = manifest(t.id); const tr = truckOf(t.truck_id);
-    return `<div class="lane"><div class="lane-top"><span class="mono">${esc(t.trip_no)}</span><strong>${esc(tr?.code || '')}</strong>
+    return `<div class="lane"><div class="lane-top"><span class="mono">${esc(t.trip_no)}</span><strong>${esc(tr?.code || '')}</strong>${dirTag(dirOf(t))}
       <span class="grow muted small">${esc(t.driver)}${t.pahinante ? ' · ' + esc(t.pahinante) : ''} · ${m.length} shipments · ${qtyFmt(m.reduce((a, s) => a + qtyOf(s), 0))} pcs</span>
       ${pill(t.status, TRIP_TONE[t.status])}</div>${routeBar(t)}</div>`;
   }).join('') : empty('No trucks on a trip right now', 'Start one from Dispatch &amp; loading.', can('dispatch') ? '<a class="btn primary" href="#dispatch">Go to dispatch</a>' : '');
@@ -264,10 +289,10 @@ VIEWS.dashboard = () => {
   if (stale.length) alerts.push(`<li>${pill('Waiting', 'gray')} ${stale.length} shipments registered over 3 days ago are not yet loaded</li>`);
 
   const recent = S.shipments.slice(0, 8);
-  return `${head('Operations overview', 'Dashboard', `Live view of freight between ${esc(originStop())} and ${esc(finalStop())}. Updated ${fDT(new Date().toISOString())}.`,
+  return `${head('Operations overview', 'Dashboard', `Live view of freight between ${esc(stopByKind('origin'))} and ${esc(stopByKind('final'))}, both directions. Updated ${fDT(new Date().toISOString())}.`,
     can('register') ? `<button class="btn primary" data-act="newShipment">${ICON.plus} Register cargo</button>` : '')}
     ${kpis}
-    <section class="card"><div class="card-h"><div><h2>Trucks and trips</h2><p>Where each active trip is on the ${esc(originStop())} – ${esc(finalStop())} route</p></div><a class="btn sm" href="#dispatch">Dispatch</a></div>${lanes}</section>
+    <section class="card"><div class="card-h"><div><h2>Trucks and trips</h2><p>Where each active trip is on the route, in either direction</p></div><a class="btn sm" href="#dispatch">Dispatch</a></div>${lanes}</section>
     <div class="grid2">
       <section class="card"><div class="card-h"><h2>Latest shipments</h2><a class="btn sm" href="#shipments">All shipments</a></div>
         ${recent.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Tracking</th><th>Consignee</th><th>Dest.</th><th>Status</th></tr></thead><tbody>
@@ -294,19 +319,21 @@ VIEWS.shipments = () => {
   else if (f === 'done') list = list.filter((s) => DONE.includes(s.status));
   else if (f === 'unpaid') list = list.filter((s) => s.payment_terms === 'Collect' && !s.paid);
   else if (f !== 'all') list = list.filter((s) => s.status === f);
+  if (S.ui.dir !== 'all') list = list.filter((s) => dirOf(s) === S.ui.dir);
   if (q) list = list.filter((s) => [s.tracking_no, s.shipper_name, s.consignee_name, s.destination, s.consignee_contact, itemsText(s)].join(' ').toLowerCase().includes(q));
   const opts = [['active', 'Active (not yet completed)'], ['all', 'All statuses'], ...Object.entries(STATUS).map(([k, v]) => [k, v[0]]), ['done', 'Completed'], ['unpaid', 'Collect – unpaid']];
-  return `${head('Freight', 'Shipments', 'Every consignment gets a tracking number when it is registered at the Manila terminal.',
+  return `${head('Freight', 'Shipments', 'Every consignment gets a tracking number when it is registered at the Manila or Vigan terminal.',
     can('register') ? `<button class="btn primary" data-act="newShipment">${ICON.plus} Register cargo</button>` : '')}
     <section class="card"><div class="card-h" style="border:0"><div class="toolbar" style="flex:1">
       <input type="search" id="q-ship" data-filter="q" placeholder="Search tracking no., shipper, consignee, item…" value="${esc(S.ui.q)}" aria-label="Search shipments">
       <select id="f-status" data-chg="fstatus" aria-label="Filter by status">${opts.map(([v, l]) => `<option value="${v}" ${v === f ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>
+      <select id="f-dir" data-chg="fdir" aria-label="Filter by direction"><option value="all">Both directions</option>${DIRS.map((d) => `<option value="${d}" ${d === S.ui.dir ? 'selected' : ''}>${esc(dirLabel(d))}</option>`).join('')}</select>
     </div></div>
     ${list.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Tracking no.</th><th>Shipper → Consignee</th><th>Destination</th><th class="num">Qty</th><th class="num">Freight</th><th>Status</th></tr></thead><tbody>
       ${list.slice(0, 300).map((s) => `<tr class="click" data-act="openShipment" data-id="${s.id}">
         <td><span class="mono">${esc(s.tracking_no)}</span><span class="sub">${fDate(s.created_at)}</span></td>
         <td>${esc(s.shipper_name)} → <strong>${esc(s.consignee_name)}</strong><span class="sub">${esc(itemsText(s).slice(0, 90))}</span></td>
-        <td>${esc(s.destination)}</td>
+        <td>${esc(s.destination)}<span class="sub">${esc(dirLabel(dirOf(s)))}</span></td>
         <td class="num">${qtyFmt(qtyOf(s))}</td>
         <td class="num">${peso(s.freight_charge)}<span class="sub">${s.payment_terms}${s.payment_terms === 'Collect' ? (s.paid ? ' · paid' : ' · unpaid') : ''}</span></td>
         <td>${statusPill(s.status)}</td></tr>`).join('')}
@@ -319,10 +346,8 @@ VIEWS.shipments = () => {
 VIEWS.dispatch = () => {
   const loading = S.trips.filter((t) => t.status === 'Loading');
   const waiting = S.shipments.filter((s) => s.status === 'REG');
-  const byDest = {};
-  waiting.forEach((s) => { (byDest[s.destination] ||= []).push(s); });
   const tripCard = (t) => {
-    const m = manifest(t.id); const tr = truckOf(t.truck_id);
+    const m = manifest(t.id); const tr = truckOf(t.truck_id); const dir = dirOf(t);
     const conf = (key, label) => {
       const at = t[`${key}_confirmed_at`]; const by = t[`${key}_confirmed_by`];
       return `<label class="check"><input type="checkbox" id="c-${key}-${t.id}" data-chg="confirm" data-trip="${t.id}" data-role="${key}" ${at ? 'checked' : ''} ${can('dispatch') ? '' : 'disabled'}>
@@ -330,15 +355,15 @@ VIEWS.dispatch = () => {
     };
     const ready = m.length && t.driver_confirmed_at && t.pahinante_confirmed_at && t.checker_confirmed_at;
     return `<section class="card">
-      <div class="card-h"><div><h2><span class="mono" style="font-size:15px">${esc(t.trip_no)}</span> · ${esc(truckLabel(tr))}</h2>
-        <p>Driver ${esc(t.driver)}${t.pahinante ? ` · Pahinante ${esc(t.pahinante)}${t.pahinante2 ? ', ' + esc(t.pahinante2) : ''}` : ''} · Planned departure ${fDT(t.planned_departure)}</p></div>
+      <div class="card-h"><div><h2><span class="mono" style="font-size:15px">${esc(t.trip_no)}</span> · ${esc(truckLabel(tr))} ${dirTag(dir)}</h2>
+        <p>Loading at ${esc(startOf(dir))} · Driver ${esc(t.driver)}${t.pahinante ? ` · Pahinante ${esc(t.pahinante)}${t.pahinante2 ? ', ' + esc(t.pahinante2) : ''}` : ''} · Planned departure ${fDT(t.planned_departure)}</p></div>
         ${can('dispatch') ? `<div class="actions"><button class="btn sm" data-act="addCargo" data-id="${t.id}">${ICON.plus} Load cargo</button>
           <button class="btn sm danger" data-act="cancelTrip" data-id="${t.id}" data-confirm="Tap again to cancel trip">Cancel trip</button></div>` : ''}</div>
       ${m.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Tracking no.</th><th>Consignee</th><th>Drop-off</th><th>Items</th><th class="num">Qty</th>${can('dispatch') ? '<th></th>' : ''}</tr></thead><tbody>
         ${m.map((s) => `<tr><td class="mono">${esc(s.tracking_no)}</td><td>${esc(s.consignee_name)}</td><td>${esc(s.destination)}</td><td>${esc(itemsText(s))}</td><td class="num">${qtyFmt(qtyOf(s))}</td>
           ${can('dispatch') ? `<td class="num"><button class="iconbtn" data-act="unloadCargo" data-id="${s.id}" aria-label="Remove ${esc(s.tracking_no)} from manifest">${ICON.x}</button></td>` : ''}</tr>`).join('')}
         <tr><td colspan="4"><strong>Manifest total</strong> · ${m.length} shipments</td><td class="num"><strong>${qtyFmt(m.reduce((a, s) => a + qtyOf(s), 0))}</strong></td>${can('dispatch') ? '<td></td>' : ''}</tr>
-      </tbody></table></div>` : empty('Manifest is empty', 'Load registered cargo onto this truck.')}
+      </tbody></table></div>` : empty('Manifest is empty', `Load registered cargo going ${esc(dirLabel(dir))} onto this truck.`)}
       <div class="card-b" style="border-top:1px solid var(--line);display:grid;gap:4px">
         <h3>Sign-off before departure</h3>
         <p class="muted small" style="margin:0 0 4px">Each person counts the cargo against the manifest. Changing the manifest clears the sign-offs.</p>
@@ -349,18 +374,23 @@ VIEWS.dispatch = () => {
           ${ready ? '' : '<span class="muted small">Needs cargo and all three sign-offs.</span>'}</div>` : ''}
       </div></section>`;
   };
+  const waitBlocks = DIRS.map((dir) => {
+    const list = waiting.filter((s) => dirOf(s) === dir); if (!list.length) return '';
+    const byDest = {}; list.forEach((s) => { (byDest[s.destination] ||= []).push(s); });
+    return `<div class="lane"><div class="lane-top"><span class="grow">${dirTag(dir)} <span class="muted small">at ${esc(startOf(dir))} terminal</span></span><span class="muted small">${list.length} shipments · ${qtyFmt(list.reduce((a, s) => a + qtyOf(s), 0))} pcs</span></div>
+      ${Object.entries(byDest).map(([d, l]) => `<div class="small"><strong>${esc(d)}</strong> · ${l.slice(0, 6).map((s) => `<a href="#" data-act="openShipment" data-id="${s.id}" class="mono">${esc(s.tracking_no)}</a>`).join(' · ')}${l.length > 6 ? ` · +${l.length - 6} more` : ''}</div>`).join('')}</div>`;
+  }).join('');
   const recent = S.trips.filter((t) => t.status !== 'Loading').slice(0, 6);
-  return `${head('Manila terminal', 'Dispatch & loading', 'Build each truck\'s manifest, get driver and pahinante sign-off, then release the truck.',
+  return `${head(`${stopByKind('origin')} & ${stopByKind('final')} terminals`, 'Dispatch & loading', 'Build each truck\'s manifest at the loading terminal, get driver and pahinante sign-off, then release the truck.',
     can('dispatch') ? `<button class="btn primary" data-act="newTrip">${ICON.plus} New trip</button>` : '')}
     ${loading.length ? loading.map(tripCard).join('') : `<section class="card">${empty('No truck is loading', 'Create a trip to start a manifest.', can('dispatch') ? `<button class="btn primary" data-act="newTrip">${ICON.plus} New trip</button>` : '')}</section>`}
     <div class="grid2">
       <section class="card"><div class="card-h"><div><h2>Waiting to be loaded</h2><p>${waiting.length} registered shipments · ${qtyFmt(waiting.reduce((a, s) => a + qtyOf(s), 0))} pcs</p></div></div>
-        ${waiting.length ? Object.entries(byDest).map(([d, list]) => `<div class="lane"><div class="lane-top"><strong class="grow">${esc(d)}</strong><span class="muted small">${list.length} shipments · ${qtyFmt(list.reduce((a, s) => a + qtyOf(s), 0))} pcs</span></div>
-          <div class="small muted">${list.slice(0, 6).map((s) => `<a href="#" data-act="openShipment" data-id="${s.id}" class="mono">${esc(s.tracking_no)}</a>`).join(' · ')}${list.length > 6 ? ` · +${list.length - 6} more` : ''}</div></div>`).join('') : empty('Nothing waiting', 'All registered cargo is on a manifest.')}
+        ${waiting.length ? waitBlocks : empty('Nothing waiting', 'All registered cargo is on a manifest.')}
       </section>
       <section class="card"><div class="card-h"><h2>Recent trips</h2></div>
         ${recent.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Trip</th><th>Truck</th><th>Departed</th><th>Status</th></tr></thead><tbody>
-        ${recent.map((t) => `<tr><td class="mono">${esc(t.trip_no)}</td><td>${esc(truckOf(t.truck_id)?.code || '')}<span class="sub">${esc(t.driver)}</span></td><td>${fDT(t.departed_at)}</td><td>${pill(t.status, TRIP_TONE[t.status])}</td></tr>`).join('')}
+        ${recent.map((t) => `<tr><td><span class="mono">${esc(t.trip_no)}</span><span class="sub">${esc(dirLabel(dirOf(t)))}</span></td><td>${esc(truckOf(t.truck_id)?.code || '')}<span class="sub">${esc(t.driver)}</span></td><td>${fDT(t.departed_at)}</td><td>${pill(t.status, TRIP_TONE[t.status])}</td></tr>`).join('')}
         </tbody></table></div>` : empty('No trips yet', 'Departed trips show here.')}
       </section>
     </div>`;
@@ -370,36 +400,35 @@ VIEWS.unloading = () => {
   const trips = S.trips.filter((t) => t.status === 'On the road');
   const inter = S.stops.filter((s) => s.kind === 'stop');
   const card = (t) => {
-    const tr = truckOf(t.truck_id); const names = stopNames(); const idx = reachedIdx(t);
-    const next = names[idx + 1]; const nextIsInter = next && next !== finalStop();
-    const m = manifest(t.id); const drops = m.filter((s) => s.destination !== finalStop());
-    const onward = m.filter((s) => s.destination === finalStop()).length;
-    return `<section class="card"><div class="card-h"><div><h2><span class="mono" style="font-size:15px">${esc(t.trip_no)}</span> · ${esc(truckLabel(tr))}</h2>
-      <p>Departed ${fDT(t.departed_at)} · Driver ${esc(t.driver)}</p></div>
+    const tr = truckOf(t.truck_id); const dir = dirOf(t); const names = routeFor(dir); const idx = reachedIdx(t); const end = endOf(dir);
+    const next = names[idx + 1]; const nextIsInter = next && next !== end;
+    const m = manifest(t.id); const drops = m.filter((s) => s.destination !== end);
+    const onward = m.filter((s) => s.destination === end).length;
+    return `<section class="card"><div class="card-h"><div><h2><span class="mono" style="font-size:15px">${esc(t.trip_no)}</span> · ${esc(truckLabel(tr))} ${dirTag(dir)}</h2>
+      <p>Departed ${esc(startOf(dir))} ${fDT(t.departed_at)} · Driver ${esc(t.driver)}</p></div>
       ${nextIsInter && can('unload') ? `<button class="btn sm dark" data-act="arriveStop" data-id="${t.id}" data-stop="${esc(next)}">${ICON.unloading} Arrived at ${esc(next)}</button>` : ''}</div>
       <div class="card-b">${routeBar(t)}</div>
       ${drops.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Tracking no.</th><th>Consignee</th><th>Drop-off</th><th class="num">Manifest qty</th><th>Status</th><th></th></tr></thead><tbody>
         ${drops.map((s) => `<tr><td class="mono">${esc(s.tracking_no)}</td><td>${esc(s.consignee_name)}<span class="sub">${esc(s.consignee_contact || '')}</span></td><td>${esc(s.destination)}</td><td class="num">${qtyFmt(qtyOf(s))}</td>
           <td>${statusPill(s.status)}${s.status === 'RELEASED' ? `<span class="sub">${qtyFmt(s.release_qty)} to ${esc(s.release_received_by)} · ${fDT(s.released_at)}</span>` : ''}</td>
           <td class="num">${s.status === 'TRANSIT' && can('unload') ? `<button class="btn sm primary" data-act="release" data-id="${s.id}">Record release</button>` : ''}</td></tr>`).join('')}
-      </tbody></table></div>` : `<div class="card-b muted">No drop-offs before ${esc(finalStop())} on this trip.</div>`}
-      <div class="card-b muted small" style="border-top:1px solid var(--line)">${onward} shipments continue to ${esc(finalStop())}.</div></section>`;
+      </tbody></table></div>` : `<div class="card-b muted">No drop-offs before ${esc(end)} on this trip.</div>`}
+      <div class="card-b muted small" style="border-top:1px solid var(--line)">${onward} shipments continue to ${esc(end)}.</div></section>`;
   };
-  return `${head('On the road', 'En-route releases', `Record every partial unloading before ${esc(finalStop())}: who received the cargo, how many pieces, and in what condition.`)}
-    ${!inter.length ? `<div class="note">No intermediate stops are set up yet. Add them in <a href="#users">Users &amp; settings</a> so cargo can be routed to them.</div>` : ''}
+  return `${head('On the road', 'En-route releases', 'Record every partial unloading before the truck reaches its end terminal: who received the cargo, how many pieces, and in what condition.')}
+    ${!inter.length ? `<div class="note">No drop-off stops are set up yet. Add them in <a href="#users">Users &amp; settings</a>. The same stops are used in both directions.</div>` : ''}
     ${trips.length ? trips.map(card).join('') : `<section class="card">${empty('No truck on the road', 'Trips appear here after departure from Dispatch.')}</section>`}`;
 };
 
 VIEWS.receiving = () => {
   const coming = S.trips.filter((t) => t.status === 'On the road');
-  const here = S.trips.filter((t) => t.status === 'At Vigan');
+  const here = S.trips.filter((t) => t.status === 'Arrived');
   const wh = S.shipments.filter((s) => s.status === 'RECEIVED');
-  const bays = {}; wh.forEach((s) => { const b = s.warehouse_bay || 'Unassigned'; (bays[b] ||= []).push(s); });
   const issues = S.issues.slice().sort((a, b) => (a.resolved - b.resolved) || (b.reported_at > a.reported_at ? 1 : -1));
   const hereCard = (t) => {
-    const m = manifest(t.id); const pending = m.filter((s) => s.status === 'TRANSIT');
-    return `<section class="card"><div class="card-h"><div><h2><span class="mono" style="font-size:15px">${esc(t.trip_no)}</span> · ${esc(truckLabel(truckOf(t.truck_id)))}</h2>
-      <p>Arrived ${fDT(t.arrived_vigan_at)} · ${pending.length} of ${m.length} shipments still to reconcile</p></div>
+    const dir = dirOf(t); const m = manifest(t.id); const pending = m.filter((s) => s.status === 'TRANSIT');
+    return `<section class="card"><div class="card-h"><div><h2><span class="mono" style="font-size:15px">${esc(t.trip_no)}</span> · ${esc(truckLabel(truckOf(t.truck_id)))} ${dirTag(dir)}</h2>
+      <p>Arrived in ${esc(endOf(dir))} ${fDT(t.arrived_at)} · ${pending.length} of ${m.length} shipments still to reconcile</p></div>
       ${can('receive') ? `<div class="actions">${pending.length ? `<button class="btn sm primary" data-act="reconcile" data-id="${t.id}">Reconcile cargo</button>` : ''}
         <button class="btn sm dark" data-act="closeTrip" data-id="${t.id}" ${pending.length ? 'disabled' : ''}>Close trip</button></div>` : ''}</div>
       <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Tracking no.</th><th>Consignee</th><th class="num">Manifest</th><th class="num">Received</th><th>Bay</th><th>Status</th></tr></thead><tbody>
@@ -408,16 +437,21 @@ VIEWS.receiving = () => {
           <td>${statusPill(s.status)}${s.received_condition && s.received_condition !== 'Good' ? ' ' + pill(s.received_condition, 'red') : ''}</td></tr>`).join('')}
       </tbody></table></div></section>`;
   };
-  return `${head(`${finalStop()} terminal`, 'Vigan receiving', 'Check every piece against the manifest, report shortages and damage, and assign a warehouse bay.')}
+  const whBlocks = ['final', 'origin'].map((k) => {
+    const list = wh.filter((s) => terminalKind(dirOf(s), 'end') === k); if (!list.length) return '';
+    const bays = {}; list.forEach((s) => { const b = s.warehouse_bay || 'Unassigned'; (bays[b] ||= []).push(s); });
+    return `<div class="lane"><div class="lane-top"><strong class="grow">${esc(stopByKind(k))} warehouse</strong><span class="muted small">${list.length} shipments</span></div>
+      ${Object.entries(bays).map(([b, l]) => `<div class="small"><strong>${esc(b)}</strong> · ${qtyFmt(l.reduce((a, s) => a + Number(s.received_qty ?? qtyOf(s)), 0))} pcs: ${l.map((s) => `<a href="#" data-act="openShipment" data-id="${s.id}" class="mono">${esc(s.tracking_no)}</a> ${esc(s.consignee_name)}`).join(' · ')}</div>`).join('')}</div>`;
+  }).join('');
+  return `${head('Terminals', 'Receiving', `When a truck arrives in ${esc(stopByKind('final'))} or ${esc(stopByKind('origin'))}, check every piece against the manifest, report shortages and damage, and assign a warehouse bay.`)}
     ${coming.length ? `<section class="card"><div class="card-h"><h2>Trucks on the way</h2></div>
-      <div class="tbl-wrap"><table class="tbl"><tbody>${coming.map((t) => `<tr><td><span class="mono">${esc(t.trip_no)}</span><span class="sub">${esc(truckLabel(truckOf(t.truck_id)))} · ${esc(t.driver)}</span></td>
-        <td>Departed ${fDT(t.departed_at)}<span class="sub">Last stop: ${esc(stopNames()[reachedIdx(t)] || originStop())}</span></td>
-        <td class="num">${can('receive') ? `<button class="btn sm dark" data-act="arriveVigan" data-id="${t.id}">Mark arrived in ${esc(finalStop())}</button>` : pill('On the road', 'blue')}</td></tr>`).join('')}</tbody></table></div></section>` : ''}
-    ${here.length ? here.map(hereCard).join('') : `<section class="card">${empty(`No truck unloading in ${esc(finalStop())}`, 'When a truck arrives, mark it here to start reconciliation.')}</section>`}
+      <div class="tbl-wrap"><table class="tbl"><tbody>${coming.map((t) => { const dir = dirOf(t); return `<tr><td><span class="mono">${esc(t.trip_no)}</span><span class="sub">${esc(truckLabel(truckOf(t.truck_id)))} · ${esc(t.driver)}</span></td>
+        <td>${dirTag(dir)}<span class="sub">Departed ${fDT(t.departed_at)} · last stop ${esc(routeFor(dir)[reachedIdx(t)] || startOf(dir))}</span></td>
+        <td class="num">${can('receive') ? `<button class="btn sm dark" data-act="arriveTerminal" data-id="${t.id}" data-end="${esc(endOf(dir))}">Mark arrived in ${esc(endOf(dir))}</button>` : pill('On the road', 'blue')}</td></tr>`; }).join('')}</tbody></table></div></section>` : ''}
+    ${here.length ? here.map(hereCard).join('') : `<section class="card">${empty('No truck unloading', 'When a truck arrives at its end terminal, mark it here to start reconciliation.')}</section>`}
     <div class="grid2">
-      <section class="card"><div class="card-h"><div><h2>Warehouse</h2><p>${wh.length} shipments waiting for delivery or pickup</p></div><a class="btn sm" href="#delivery">Delivery</a></div>
-        ${wh.length ? Object.entries(bays).map(([b, list]) => `<div class="lane"><div class="lane-top"><strong class="grow">${esc(b)}</strong><span class="muted small">${list.length} shipments · ${qtyFmt(list.reduce((a, s) => a + Number(s.received_qty ?? qtyOf(s)), 0))} pcs</span></div>
-          <div class="small">${list.map((s) => `<a href="#" data-act="openShipment" data-id="${s.id}" class="mono">${esc(s.tracking_no)}</a> ${esc(s.consignee_name)}`).join(' · ')}</div></div>`).join('') : empty('Warehouse is clear', 'Received cargo appears here by bay.')}
+      <section class="card"><div class="card-h"><div><h2>Warehouses</h2><p>${wh.length} shipments waiting for delivery or pickup</p></div><a class="btn sm" href="#delivery">Delivery</a></div>
+        ${wh.length ? whBlocks : empty('Warehouses are clear', 'Received cargo appears here by terminal and bay.')}
       </section>
       <section class="card"><div class="card-h"><div><h2>Shortage &amp; damage reports</h2><p>${S.issues.filter((i) => !i.resolved).length} open</p></div></div>
         ${issues.length ? `<div class="tbl-wrap"><table class="tbl"><tbody>${issues.slice(0, 30).map((i) => {
@@ -425,7 +459,7 @@ VIEWS.receiving = () => {
           return `<tr><td>${pill(i.kind, i.resolved ? 'gray' : 'red')}<span class="sub">${fDT(i.reported_at)}</span></td>
             <td><a href="#" data-act="openShipment" data-id="${esc(i.shipment_id)}" class="mono">${esc(s?.tracking_no || '')}</a> ${esc(i.description)}${i.qty_affected ? ` · ${qtyFmt(i.qty_affected)} pcs` : ''}<span class="sub">${esc(i.stage || '')} · reported by ${esc(personName(i.reported_by))}${i.resolved ? ` · Resolved: ${esc(i.resolution || '')}` : ''}</span></td>
             <td class="num">${!i.resolved && can('resolve') ? `<button class="btn sm" data-act="resolveIssue" data-id="${i.id}">Resolve</button>` : ''}</td></tr>`;
-        }).join('')}</tbody></table></div>` : empty('No reports', 'Shortages and damage found during release or receiving are logged here.')}
+        }).join('')}</tbody></table></div>` : empty('No reports', 'Shortages and damage found during release, receiving or delivery are logged here.')}
       </section>
     </div>`;
 };
@@ -435,18 +469,19 @@ VIEWS.delivery = () => {
   const out = S.shipments.filter((s) => s.status === 'OUT');
   const done = S.shipments.filter((s) => s.status === 'DELIVERED' || s.status === 'PICKUP').sort((a, b) => (b.delivered_at || '') > (a.delivered_at || '') ? 1 : -1).slice(0, 25);
   const vehicles = [...new Set([...S.vehicles.filter((v) => v.active).map((v) => v.name), ...out.map((s) => s.delivery_vehicle)])];
-  return `${head(`${finalStop()} last mile`, 'Delivery', 'Assign warehouse cargo to an Elf truck or korong-korong, then record proof of delivery.')}
+  const vterm = (name) => stopByKind(S.vehicles.find((v) => v.name === name)?.terminal || 'final');
+  return `${head('Last mile', 'Delivery', `Assign warehouse cargo to a delivery vehicle, such as the Elf truck or korong-korong in ${esc(stopByKind('final'))}, then record proof of delivery.`)}
     <section class="card"><div class="card-h"><div><h2>In warehouse</h2><p>${wh.length} shipments ready</p></div></div>
-      ${wh.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Tracking no.</th><th>Consignee</th><th>Bay</th><th class="num">Qty</th><th>Payment</th><th></th></tr></thead><tbody>
+      ${wh.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Tracking no.</th><th>Consignee</th><th>Warehouse</th><th class="num">Qty</th><th>Payment</th><th></th></tr></thead><tbody>
       ${wh.map((s) => `<tr><td><a href="#" class="mono" data-act="openShipment" data-id="${s.id}">${esc(s.tracking_no)}</a><span class="sub">Received ${fDT(s.received_at)}</span></td>
-        <td><strong>${esc(s.consignee_name)}</strong><span class="sub">${esc(s.consignee_address || '')} ${esc(s.consignee_contact || '')}</span></td><td>${esc(s.warehouse_bay || '—')}</td>
+        <td><strong>${esc(s.consignee_name)}</strong><span class="sub">${esc(s.consignee_address || '')} ${esc(s.consignee_contact || '')}</span></td><td>${esc(stopByKind(terminalKind(dirOf(s), 'end')))}<span class="sub">${esc(s.warehouse_bay || 'No bay')}</span></td>
         <td class="num">${qtyFmt(s.received_qty ?? qtyOf(s))}</td><td>${s.payment_terms === 'Collect' && !s.paid ? pill('Collect ' + peso(s.freight_charge), 'gold') : pill('Paid', 'green')}</td>
         <td class="num">${can('deliver') ? `<div class="actions" style="justify-content:flex-end"><button class="btn sm primary" data-act="assign" data-id="${s.id}">Assign vehicle</button><button class="btn sm" data-act="pod" data-mode="pickup" data-id="${s.id}">Pickup</button></div>` : ''}</td></tr>`).join('')}
-      </tbody></table></div>` : empty('Nothing waiting in the warehouse', 'Cargo appears here after Vigan receiving.')}
+      </tbody></table></div>` : empty('Nothing waiting in the warehouses', 'Cargo appears here after receiving.')}
     </section>
     <div class="grid3">${vehicles.map((v) => {
       const list = out.filter((s) => s.delivery_vehicle === v);
-      return `<section class="card"><div class="card-h"><div><h2>${esc(v)}</h2><p>${list.length} out for delivery</p></div>${ICON.delivery.replace('<svg', '<svg style="width:26px;height:26px;color:var(--gold-ink)"')}</div>
+      return `<section class="card"><div class="card-h"><div><h2>${esc(v)}</h2><p>${esc(vterm(v))} · ${list.length} out for delivery</p></div>${ICON.delivery.replace('<svg', '<svg style="width:26px;height:26px;color:var(--gold-ink)"')}</div>
         ${list.length ? list.map((s) => `<div class="lane"><div class="lane-top"><span class="grow"><span class="mono">${esc(s.tracking_no)}</span> <strong>${esc(s.consignee_name)}</strong><span class="sub muted small">${esc(s.consignee_address || '')} · ${qtyFmt(s.received_qty ?? qtyOf(s))} pcs · crew ${esc(s.delivery_crew || '—')}</span></span></div>
           ${can('deliver') ? `<div class="actions"><button class="btn sm primary" data-act="pod" data-mode="deliver" data-id="${s.id}">Record delivery</button><button class="btn sm" data-act="backToWh" data-id="${s.id}" data-confirm="Tap again to return">Return to warehouse</button></div>` : ''}</div>`).join('')
         : '<div class="card-b muted">No deliveries assigned.</div>'}</section>`;
@@ -472,7 +507,7 @@ VIEWS.fleet = () => {
     const tCost = S.maint.filter((m) => m.truck_id === t.id && m.log_date >= yr).reduce((a, m) => a + Number(m.cost), 0);
     return `<section class="card truck"><div class="truck-top"><span class="truck-badge">${ICON.fleet}</span><div style="flex:1;min-width:0"><h3>${esc(t.code)}</h3><div class="muted small">${esc(t.plate_no || 'Plate no. not set')} · ${esc(t.model)}</div></div>${pill(t.status, tone[t.status])}</div>
       <dl class="dl"><div><dt>Driver</dt><dd>${esc(t.default_driver || '—')}</dd></div><div><dt>Odometer</dt><dd>${t.odometer_km != null ? qtyFmt(t.odometer_km) + ' km' : '—'}</dd></div>
-        <div><dt>Current trip</dt><dd>${trip ? `<span class="mono">${esc(trip.trip_no)}</span> · ${esc(trip.status)}` : 'None'}</dd></div><div><dt>Maintenance ${yr.slice(0, 4)}</dt><dd>${peso(tCost)}</dd></div></dl>
+        <div><dt>Trip / location</dt><dd>${trip ? `<span class="mono">${esc(trip.trip_no)}</span> · ${esc(trip.status === 'Arrived' ? `Arrived in ${endOf(dirOf(trip))}` : trip.status === 'Loading' ? `Loading at ${startOf(dirOf(trip))}` : `${dirLabel(dirOf(trip))}`)}` : esc(truckWhere(t).replace(/^at /, 'Parked at ').replace(/^location/, 'Location'))}</dd></div><div><dt>Maintenance ${yr.slice(0, 4)}</dt><dd>${peso(tCost)}</dd></div></dl>
       <div>${pms}</div>
       <div class="muted small">Last work: ${last ? `${fDate(last.log_date)} · ${esc(last.kind)} · ${esc(last.description)}` : 'none recorded'}</div>
       ${can('fleet') ? `<div class="actions"><button class="btn sm" data-act="editTruck" data-id="${t.id}">Edit truck</button><button class="btn sm" data-act="logMaint" data-id="${t.id}">${ICON.wrench} Log maintenance</button></div>` : ''}
@@ -483,9 +518,9 @@ VIEWS.fleet = () => {
     can('fleet') ? `<button class="btn" data-act="logMaint">${ICON.wrench} Log maintenance</button><button class="btn primary" data-act="editTruck">${ICON.plus} Add truck</button>` : '')}
     <div class="grid3">${cards || empty('No trucks', 'Add your trucks to start.')}</div>
     <section class="card"><div class="card-h"><div><h2>Trip schedule</h2><p>Active trips and the last 120 days</p></div></div>
-      ${trips.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Trip</th><th>Truck</th><th>Crew</th><th>Planned</th><th>Departed</th><th>Arrived ${esc(finalStop())}</th><th>Status</th></tr></thead><tbody>
-      ${trips.map((t) => `<tr><td class="mono">${esc(t.trip_no)}</td><td>${esc(truckOf(t.truck_id)?.code || '')}</td><td>${esc(t.driver)}<span class="sub">${esc([t.pahinante, t.pahinante2].filter(Boolean).join(', '))}</span></td>
-        <td>${fDT(t.planned_departure)}</td><td>${fDT(t.departed_at)}</td><td>${fDT(t.arrived_vigan_at)}</td><td>${pill(t.status, TRIP_TONE[t.status])}</td></tr>`).join('')}
+      ${trips.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Trip</th><th>Direction</th><th>Truck</th><th>Crew</th><th>Planned</th><th>Departed</th><th>Arrived</th><th>Status</th></tr></thead><tbody>
+      ${trips.map((t) => `<tr><td class="mono">${esc(t.trip_no)}</td><td>${dirTag(dirOf(t))}</td><td>${esc(truckOf(t.truck_id)?.code || '')}</td><td>${esc(t.driver)}<span class="sub">${esc([t.pahinante, t.pahinante2].filter(Boolean).join(', '))}</span></td>
+        <td>${fDT(t.planned_departure)}</td><td>${fDT(t.departed_at)}</td><td>${fDT(t.arrived_at)}</td><td>${pill(t.status, TRIP_TONE[t.status])}</td></tr>`).join('')}
       </tbody></table></div>` : empty('No trips yet', 'Trips created in Dispatch show here.')}
     </section>
     <section class="card"><div class="card-h"><div><h2>Maintenance &amp; repair history</h2><p>${peso(costYear)} spent in ${yr.slice(0, 4)}</p></div></div>
@@ -509,7 +544,7 @@ VIEWS.reports = () => {
   const collected = ships.filter((s) => s.paid || s.payment_terms === 'Prepaid').reduce((a, s) => a + Number(s.freight_charge), 0);
   const outstanding = ships.filter((s) => s.payment_terms === 'Collect' && !s.paid);
   const maintCost = r.maint.reduce((a, m) => a + Number(m.cost), 0);
-  const byDest = {}; ships.forEach((s) => { const d = (byDest[s.destination] ||= { n: 0, q: 0, f: 0 }); d.n++; d.q += qtyOf(s); d.f += Number(s.freight_charge); });
+  const byDest = {}; ships.forEach((s) => { const d = (byDest[`${dirLabel(dirOf(s))}|${s.destination}`] ||= { n: 0, q: 0, f: 0 }); d.n++; d.q += qtyOf(s); d.f += Number(s.freight_charge); });
   const byTruck = S.trucks.map((t) => ({
     t, trips: r.trips.filter((x) => x.truck_id === t.id).length,
     ships: ships.filter((s) => r.trips.some((x) => x.id === s.trip_id && x.truck_id === t.id)).length,
@@ -532,9 +567,9 @@ VIEWS.reports = () => {
       <button class="btn" data-act="csv" data-kind="maint">${ICON.download} Maintenance CSV</button>
     </div>
     <div class="grid2">
-      <section class="card"><div class="card-h"><h2>By destination</h2></div>
-        ${Object.keys(byDest).length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Destination</th><th class="num">Shipments</th><th class="num">Pieces</th><th class="num">Freight</th></tr></thead><tbody>
-        ${Object.entries(byDest).sort((a, b) => b[1].f - a[1].f).map(([d, v]) => `<tr><td>${esc(d)}</td><td class="num">${v.n}</td><td class="num">${qtyFmt(v.q)}</td><td class="num">${peso(v.f)}</td></tr>`).join('')}
+      <section class="card"><div class="card-h"><h2>By direction and destination</h2></div>
+        ${Object.keys(byDest).length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Direction</th><th>Destination</th><th class="num">Shipments</th><th class="num">Pieces</th><th class="num">Freight</th></tr></thead><tbody>
+        ${Object.entries(byDest).sort((a, b) => b[1].f - a[1].f).map(([d, v]) => `<tr><td>${esc(d.split('|')[0])}</td><td>${esc(d.split('|')[1])}</td><td class="num">${v.n}</td><td class="num">${qtyFmt(v.q)}</td><td class="num">${peso(v.f)}</td></tr>`).join('')}
         </tbody></table></div>` : empty('No shipments in this period', '')}
       </section>
       <section class="card"><div class="card-h"><h2>By truck</h2></div>
@@ -561,7 +596,7 @@ VIEWS.users = () => {
   const crewRows = S.crew.map((c) => `<tr><td><strong>${esc(c.full_name)}</strong><span class="sub">${esc(c.phone || '')}</span></td><td>${esc(c.role)}</td><td>${c.active ? pill('Active', 'green') : pill('Inactive', 'gray')}</td>
     <td class="num">${can('crew') ? `<button class="btn sm" data-act="editCrew" data-id="${c.id}">Edit</button>` : ''}</td></tr>`).join('');
   const matrix = [
-    ['Register cargo', 'register'], ['Dispatch & loading sign-off', 'dispatch'], ['En-route releases', 'unload'], ['Vigan receiving', 'receive'],
+    ['Register cargo', 'register'], ['Dispatch & loading sign-off', 'dispatch'], ['En-route releases', 'unload'], ['Receiving', 'receive'],
     ['Delivery & proof of delivery', 'deliver'], ['Resolve shortage / damage', 'resolve'], ['Mark freight paid', 'paid'], ['Fleet & maintenance', 'fleet'],
     ['Crew list', 'crew'], ['Route & warehouse settings', 'settings'], ['Staff accounts & roles', 'admin'],
   ];
@@ -576,13 +611,13 @@ VIEWS.users = () => {
       ${can('crew') ? `<button class="btn sm primary" data-act="editCrew">${ICON.plus} Add crew</button>` : ''}</div>
       ${S.crew.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Name</th><th>Role</th><th>Status</th><th></th></tr></thead><tbody>${crewRows}</tbody></table></div>` : empty('No crew yet', 'Add drivers and pahinante so dispatch can assign them.')}</section>
     <div class="grid3">
-      <section class="card"><div class="card-h"><div><h2>Route</h2><p>Stops in travel order</p></div>${can('settings') ? `<button class="btn sm" data-act="addStop">${ICON.plus} Add stop</button>` : ''}</div>
+      <section class="card"><div class="card-h"><div><h2>Route</h2><p>In ${esc(dirLabel('northbound'))} order. Return trips run in reverse.</p></div>${can('settings') ? `<button class="btn sm" data-act="addStop">${ICON.plus} Add stop</button>` : ''}</div>
         <div class="tbl-wrap"><table class="tbl"><tbody>${S.stops.map((s) => `<tr><td>${esc(s.name)}</td><td>${s.kind === 'origin' ? pill('Origin', 'navy') : s.kind === 'final' ? pill('Final', 'navy') : pill('Drop-off', 'gray')}</td>
           <td class="num">${s.kind === 'stop' && can('settings') ? `<button class="iconbtn" data-act="delStop" data-id="${s.id}" data-confirm="Remove?" aria-label="Remove ${esc(s.name)}">${ICON.x}</button>` : ''}</td></tr>`).join('')}</tbody></table></div></section>
-      <section class="card"><div class="card-h"><div><h2>Warehouse bays</h2><p>${esc(finalStop())} warehouse</p></div>${can('settings') ? `<button class="btn sm" data-act="addBay">${ICON.plus} Add bay</button>` : ''}</div>
-        ${S.bays.length ? `<div class="tbl-wrap"><table class="tbl"><tbody>${S.bays.map((b) => `<tr><td>${esc(b.name)}</td><td class="num">${can('settings') ? `<button class="iconbtn" data-act="delBay" data-id="${b.id}" data-confirm="Remove?" aria-label="Remove ${esc(b.name)}">${ICON.x}</button>` : ''}</td></tr>`).join('')}</tbody></table></div>` : empty('No bays yet', 'Add the bays or sections of the warehouse.')}</section>
-      <section class="card"><div class="card-h"><div><h2>Delivery vehicles</h2><p>Last-mile in ${esc(finalStop())}</p></div>${can('settings') ? `<button class="btn sm" data-act="addVehicle">${ICON.plus} Add</button>` : ''}</div>
-        <div class="tbl-wrap"><table class="tbl"><tbody>${S.vehicles.map((v) => `<tr><td>${esc(v.name)}<span class="sub">${esc(v.kind)}${v.plate_no ? ' · ' + esc(v.plate_no) : ''}</span></td>
+      <section class="card"><div class="card-h"><div><h2>Warehouse bays</h2><p>${esc(stopByKind('final'))} and ${esc(stopByKind('origin'))} warehouses</p></div>${can('settings') ? `<button class="btn sm" data-act="addBay">${ICON.plus} Add bay</button>` : ''}</div>
+        ${S.bays.length ? `<div class="tbl-wrap"><table class="tbl"><tbody>${S.bays.slice().sort((a, b) => ((a.terminal || 'final') + a.name > (b.terminal || 'final') + b.name ? 1 : -1)).map((b) => `<tr><td>${esc(b.name)}<span class="sub">${esc(stopByKind(b.terminal || 'final'))}</span></td><td class="num">${can('settings') ? `<button class="iconbtn" data-act="delBay" data-id="${b.id}" data-confirm="Remove?" aria-label="Remove ${esc(b.name)}">${ICON.x}</button>` : ''}</td></tr>`).join('')}</tbody></table></div>` : empty('No bays yet', 'Add the bays or sections of the warehouse.')}</section>
+      <section class="card"><div class="card-h"><div><h2>Delivery vehicles</h2><p>Last mile at each terminal</p></div>${can('settings') ? `<button class="btn sm" data-act="addVehicle">${ICON.plus} Add</button>` : ''}</div>
+        <div class="tbl-wrap"><table class="tbl"><tbody>${S.vehicles.map((v) => `<tr><td>${esc(v.name)}<span class="sub">${esc(stopByKind(v.terminal || 'final'))} · ${esc(v.kind)}${v.plate_no ? ' · ' + esc(v.plate_no) : ''}</span></td>
           <td class="num">${can('settings') ? `<label class="check" style="justify-content:flex-end"><input type="checkbox" id="veh-${v.id}" data-chg="vehActive" data-id="${v.id}" ${v.active ? 'checked' : ''}> In use</label>` : (v.active ? pill('In use', 'green') : pill('Off', 'gray'))}</td></tr>`).join('')}</tbody></table></div></section>
     </div>
     <section class="card"><div class="card-h"><div><h2>Roles and access</h2><p>What each role can do. Everyone with a role can view all records.</p></div></div>
@@ -650,7 +685,7 @@ function recalcFreight() {
 }
 
 function shipmentForm(s) {
-  const dests = S.stops.filter((x) => x.kind !== 'origin').map((x) => x.name);
+  const dir = s ? dirOf(s) : (DIRS.includes(S.ui.lastDir) ? S.ui.lastDir : 'northbound');
   openModal({
     title: s ? `Edit ${s.tracking_no}` : 'Register cargo', wide: true,
     form: { name: 'shipment', data: { id: s?.id || '' } },
@@ -664,7 +699,8 @@ function shipmentForm(s) {
         <label class="f">Delivery address<input id="sh-cons-a" name="consignee_address" value="${esc(s?.consignee_address || '')}"></label></fieldset>
     </div>
     <div class="fgrid">
-      <label class="f">Destination <span class="req">*</span><select id="sh-dest" name="destination">${dests.map((d) => `<option ${d === (s?.destination || finalStop()) ? 'selected' : ''}>${esc(d)}</option>`).join('')}</select></label>
+      <label class="f">Direction <span class="req">*</span>${dirSelect('sh-dir', 'direction', dir, 'data-chg="shipDir"')}</label>
+      <label class="f">Destination <span class="req">*</span><select id="sh-dest" name="destination">${destOptions(dir, s?.destination)}</select></label>
       <label class="f">Payment<select id="sh-pay" name="payment_terms">${['Prepaid', 'Collect'].map((p) => `<option value="${p}" ${p === (s?.payment_terms || 'Prepaid') ? 'selected' : ''}>${p === 'Collect' ? 'Collect on delivery' : 'Prepaid at Manila'}</option>`).join('')}</select></label>
       <label class="f">Declared value (₱)<input id="sh-decl" name="declared_value" type="number" min="0" step="0.01" value="${esc(s?.declared_value ?? '')}"></label>
     </div>
@@ -703,7 +739,7 @@ async function openShipment(id) {
       ${sec('Consignment', [
         ['Shipper', `${esc(s.shipper_name)}<br><span class="muted small">${esc(s.shipper_contact || '')}</span>`],
         ['Consignee', `${esc(s.consignee_name)}<br><span class="muted small">${esc(s.consignee_contact || '')} ${esc(s.consignee_address || '')}</span>`],
-        ['Destination', esc(s.destination)],
+        ['Destination', `${esc(s.destination)}<br><span class="muted small">${esc(dirLabel(dirOf(s)))}</span>`],
         ['Freight', `${peso(s.freight_charge)}<br><span class="muted small">${s.payment_terms}${s.payment_terms === 'Collect' ? (s.paid ? ` · paid ${fDT(s.paid_at)}` : ' · not yet paid') : ''}</span>`],
         s.declared_value != null && ['Declared value', peso(s.declared_value)],
         ['Registered', `${fDT(s.created_at)}<br><span class="muted small">by ${esc(personName(s.created_by))}</span>`],
@@ -715,7 +751,7 @@ async function openShipment(id) {
         <tr><td colspan="2"><strong>Total</strong></td><td class="num"><strong>${qtyFmt(qtyOf(s))}</strong></td><td></td><td></td><td class="num"><strong>${peso(s.freight_charge)}</strong></td></tr></tbody></table></div>
       ${s.notes ? `<p style="margin:0"><strong>Notes:</strong> ${esc(s.notes)}</p>` : ''}
       ${s.released_at ? sec('Released en route', [['Stop', esc(s.destination)], ['Qty released', qtyFmt(s.release_qty)], ['Received by', `${esc(s.release_received_by)}<br><span class="muted small">${esc(s.release_id_ref || '')}</span>`], ['Condition', esc(s.release_condition)], ['When', `${fDT(s.released_at)}<br><span class="muted small">by ${esc(personName(s.released_by))}</span>`], s.release_note && ['Note', esc(s.release_note)]]) : ''}
-      ${s.received_at ? sec(`Received in ${esc(finalStop())}`, [['Qty received', qtyFmt(s.received_qty)], ['Condition', esc(s.received_condition)], ['Bay', esc(s.warehouse_bay || '—')], ['When', `${fDT(s.received_at)}<br><span class="muted small">by ${esc(personName(s.received_by))}</span>`], s.receiving_note && ['Note', esc(s.receiving_note)]]) : ''}
+      ${s.received_at ? sec(`Received in ${esc(endOf(dirOf(s)))}`, [['Qty received', qtyFmt(s.received_qty)], ['Condition', esc(s.received_condition)], ['Bay', esc(s.warehouse_bay || '—')], ['When', `${fDT(s.received_at)}<br><span class="muted small">by ${esc(personName(s.received_by))}</span>`], s.receiving_note && ['Note', esc(s.receiving_note)]]) : ''}
       ${s.assigned_at ? sec('Delivery', [['Vehicle', esc(s.delivery_vehicle)], ['Crew', esc(s.delivery_crew || '—')], ['Assigned', fDT(s.assigned_at)]]) : ''}
       ${s.delivered_at ? sec(s.status === 'PICKUP' ? 'Picked up' : 'Proof of delivery', [['Received by', `${esc(s.pod_received_by)}<br><span class="muted small">${esc(s.pod_id_ref || '')}</span>`], ['When', fDT(s.delivered_at)], ['Condition', esc(s.pod_condition)], s.pod_note && ['Note', esc(s.pod_note)], s.pod_photo_path && ['Photo', `<button type="button" class="btn sm" data-act="photo" data-path="${esc(s.pod_photo_path)}">View photo</button>`]]) : ''}
       ${issues.length ? `<div style="display:grid;gap:8px"><h3>Shortage &amp; damage</h3>${issues.map((i) => `<div class="note ${i.resolved ? '' : 'bad'}"><strong>${esc(i.kind)}</strong> · ${esc(i.description)} · ${fDT(i.reported_at)}${i.resolved ? ` · Resolved: ${esc(i.resolution || '')}` : ''}</div>`).join('')}</div>` : ''}
@@ -733,26 +769,29 @@ function tripForm() {
   openModal({
     title: 'New trip', form: { name: 'trip' },
     body: `<div class="fgrid">
-      <label class="f span">Truck <span class="req">*</span><select id="tr-truck" name="truck_id" data-chg="tripTruck">${avail.map((t) => `<option value="${t.id}" data-driver="${esc(t.default_driver || '')}">${esc(truckLabel(t))}</option>`).join('')}</select></label>
+      <label class="f">Truck <span class="req">*</span><select id="tr-truck" name="truck_id" data-chg="tripTruck">${avail.map((t) => `<option value="${t.id}" data-driver="${esc(t.default_driver || '')}" data-dir="${suggestDir(t)}">${esc(truckLabel(t))} · ${esc(truckWhere(t))}</option>`).join('')}</select></label>
+      <label class="f">Direction <span class="req">*</span>${dirSelect('tr-dir', 'direction', suggestDir(avail[0]))}</label>
       <label class="f">Driver <span class="req">*</span><input id="tr-driver" name="driver" list="dl-driver" value="${esc(avail[0].default_driver || '')}" autocomplete="off"></label>
       <label class="f">Pahinante <span class="req">*</span><input id="tr-pah" name="pahinante" list="dl-pah" autocomplete="off"></label>
       <label class="f">Second pahinante<input id="tr-pah2" name="pahinante2" list="dl-pah" autocomplete="off"></label>
       <label class="f">Planned departure<input id="tr-dep" name="planned_departure" type="datetime-local" value="${nowLocalInput()}"></label>
       <label class="f span">Notes<textarea id="tr-notes" name="notes"></textarea></label></div>
       ${crewList('dl-driver', 'Driver')}${crewList('dl-pah', 'Pahinante')}
+      <p class="muted small" style="margin:0">Direction is suggested from where the truck last ended a trip. A truck parked in ${esc(stopByKind('final'))} usually loads return cargo for ${esc(stopByKind('origin'))}.</p>
       ${!S.crew.length ? '<p class="muted small" style="margin:0">Tip: add drivers and pahinante in Users &amp; settings to pick them from a list.</p>' : ''}`,
     foot: `${cancelBtn}<button class="btn primary" type="submit">Create trip</button>`,
   });
 }
 
 function addCargoForm(tripId) {
-  const waiting = S.shipments.filter((s) => s.status === 'REG');
-  if (!waiting.length) { toast('No registered cargo is waiting. Register cargo first.', 'err'); return; }
-  const names = stopNames();
+  const trip = tripOf(tripId); const dir = dirOf(trip);
+  const waiting = S.shipments.filter((s) => s.status === 'REG' && dirOf(s) === dir);
+  if (!waiting.length) { toast(`No registered cargo going ${dirLabel(dir)} is waiting. Register cargo first.`, 'err'); return; }
+  const names = routeFor(dir);
   waiting.sort((a, b) => names.indexOf(b.destination) - names.indexOf(a.destination));
   openModal({
-    title: `Load cargo onto ${tripOf(tripId)?.trip_no || 'trip'}`, wide: true, form: { name: 'addCargo', data: { trip: tripId } },
-    body: `<p class="muted" style="margin:0">Sorted farthest drop-off first, so cargo for ${esc(finalStop())} goes in deepest.</p>
+    title: `Load cargo onto ${trip.trip_no}`, wide: true, form: { name: 'addCargo', data: { trip: tripId } },
+    body: `<p class="muted" style="margin:0">${esc(dirLabel(dir))} cargo, farthest drop-off first, so cargo for ${esc(endOf(dir))} goes in deepest.</p>
       <div class="tbl-wrap"><table class="tbl"><thead><tr><th><label class="check" style="min-height:0"><input type="checkbox" data-chg="checkAll" aria-label="Select all"></label></th><th>Tracking no.</th><th>Consignee</th><th>Drop-off</th><th>Items</th><th class="num">Qty</th></tr></thead><tbody>
       ${waiting.map((s) => `<tr><td><input type="checkbox" name="sid" value="${s.id}" id="ld-${s.id}" style="width:20px;height:20px;min-height:0" aria-label="Load ${esc(s.tracking_no)}"></td>
         <td class="mono"><label for="ld-${s.id}">${esc(s.tracking_no)}</label></td><td>${esc(s.consignee_name)}</td><td>${esc(s.destination)}</td><td>${esc(itemsText(s))}</td><td class="num">${qtyFmt(qtyOf(s))}</td></tr>`).join('')}
@@ -777,14 +816,15 @@ function releaseForm(id) {
 }
 
 function reconcileForm(tripId) {
-  const t = tripOf(tripId);
+  const t = tripOf(tripId); const dir = dirOf(t); const end = endOf(dir); const k = terminalKind(dir, 'end');
   const list = manifest(tripId).filter((s) => s.status === 'TRANSIT');
-  const bayOpts = (name) => `<select name="${name}" aria-label="Warehouse bay"><option value="">Unassigned</option>${S.bays.map((b) => `<option>${esc(b.name)}</option>`).join('')}</select>`;
+  const bays = S.bays.filter((b) => (b.terminal || 'final') === k);
+  const bayOpts = (name) => `<select name="${name}" aria-label="Warehouse bay"><option value="">Unassigned</option>${bays.map((b) => `<option>${esc(b.name)}</option>`).join('')}</select>`;
   openModal({
-    title: `Reconcile ${t.trip_no}`, wide: true, form: { name: 'reconcile', data: { trip: tripId } },
-    body: `<p class="muted" style="margin:0">Count each consignment. Any difference or damage is logged automatically as a report.</p>
+    title: `Reconcile ${t.trip_no} in ${end}`, wide: true, form: { name: 'reconcile', data: { trip: tripId } },
+    body: `<p class="muted" style="margin:0">Count each consignment. Any difference or damage is logged automatically as a report.${bays.length ? '' : ` No bays are set up for the ${esc(end)} warehouse yet; add them in Users &amp; settings.`}</p>
       <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Shipment</th><th class="num">Manifest</th><th>Received</th><th>Condition</th><th>Bay</th><th>Note</th></tr></thead><tbody>
-      ${list.map((s) => `<tr><td><span class="mono">${esc(s.tracking_no)}</span><span class="sub">${esc(s.consignee_name)} · ${esc(itemsText(s).slice(0, 60))}</span>${s.destination !== finalStop() ? pill(`Was for ${s.destination}`, 'orange') : ''}</td>
+      ${list.map((s) => `<tr><td><span class="mono">${esc(s.tracking_no)}</span><span class="sub">${esc(s.consignee_name)} · ${esc(itemsText(s).slice(0, 60))}</span>${s.destination !== end ? pill(`Was for ${s.destination}`, 'orange') : ''}</td>
         <td class="num">${qtyFmt(qtyOf(s))}</td>
         <td><input name="rq_${s.id}" type="number" min="0" step="any" value="${qtyOf(s)}" style="width:96px" aria-label="Received qty"></td>
         <td><select name="rc_${s.id}" aria-label="Condition"><option>Good</option><option>Short</option><option>Damaged</option></select></td>
@@ -796,11 +836,14 @@ function reconcileForm(tripId) {
 }
 
 function assignForm(id) {
-  const s = shipOf(id);
-  const veh = S.vehicles.filter((v) => v.active);
+  const s = shipOf(id); const k = terminalKind(dirOf(s), 'end');
+  let veh = S.vehicles.filter((v) => v.active && (v.terminal || 'final') === k);
+  const none = !veh.length; if (none) veh = S.vehicles.filter((v) => v.active);
+  if (!veh.length) { toast('Add a delivery vehicle in Users & settings first.', 'err'); return; }
   openModal({
     title: `Assign ${s.tracking_no} for delivery`, form: { name: 'assign', data: { id } },
-    body: `<p style="margin:0"><strong>${esc(s.consignee_name)}</strong> · ${esc(s.consignee_address || 'no address on file')} · ${qtyFmt(s.received_qty ?? qtyOf(s))} pcs</p>
+    body: `<p style="margin:0"><strong>${esc(s.consignee_name)}</strong> · ${esc(s.consignee_address || 'no address on file')} · ${qtyFmt(s.received_qty ?? qtyOf(s))} pcs · ${esc(stopByKind(k))} warehouse</p>
+      ${none ? `<div class="note warn">No delivery vehicle is set up for ${esc(stopByKind(k))} yet, so all vehicles are listed. Add one in Users &amp; settings.</div>` : ''}
       <div class="fgrid"><label class="f">Vehicle <span class="req">*</span><select id="as-veh" name="vehicle">${veh.map((v) => `<option>${esc(v.name)}</option>`).join('')}</select></label>
       <label class="f">Driver / crew<input id="as-crew" name="crew" list="dl-dcrew" autocomplete="off"></label></div>${crewList('dl-dcrew')}`,
     foot: `${cancelBtn}<button class="btn primary" type="submit">Assign</button>`,
@@ -903,7 +946,7 @@ const ACT = {
   depart: async (d, b) => { b.disabled = true; await after(await run(sb.rpc('depart_trip', { p_trip: d.id }), 'Truck departed. Shipments are now in transit.')); },
   arriveStop: async (d) => after(await run(sb.from('trip_stop_logs').insert({ trip_id: d.id, stop_name: d.stop }), `Arrival at ${d.stop} recorded`)),
   release: (d) => releaseForm(d.id),
-  arriveVigan: async (d) => after(await run(sb.rpc('arrive_vigan', { p_trip: d.id }), `Truck arrived in ${finalStop()}. Start reconciliation.`)),
+  arriveTerminal: async (d) => after(await run(sb.rpc('arrive_terminal', { p_trip: d.id }), `Truck arrived in ${d.end}. Start reconciliation.`)),
   reconcile: (d) => reconcileForm(d.id),
   closeTrip: async (d) => after(await run(sb.rpc('close_trip', { p_trip: d.id }), 'Trip closed. Truck is available again.')),
   resolveIssue: (d) => simpleForm('Resolve report', 'resolve', `<input type="hidden" name="id" value="${esc(d.id)}"><label class="f span">How was it resolved? <span class="req">*</span><textarea id="rs-text" name="resolution" placeholder="e.g. Shipper confirmed short-loaded; freight adjusted"></textarea></label>`, 'Mark resolved'),
@@ -925,22 +968,24 @@ const ACT = {
     const sel = $('#st-after'); if (sel) sel.value = String(S.stops.length - 2);
   },
   delStop: async (d) => after(await run(sb.from('route_stops').delete().eq('id', d.id), 'Stop removed')),
-  addBay: () => simpleForm('Add warehouse bay', 'bay', '<label class="f span">Bay name <span class="req">*</span><input id="bay-name" name="name" placeholder="e.g. Bay A"></label>', 'Add bay'),
+  addBay: () => simpleForm('Add warehouse bay', 'bay', `${termSelect('bay-term')}<label class="f">Bay name <span class="req">*</span><input id="bay-name" name="name" placeholder="e.g. Bay A"></label>`, 'Add bay'),
   delBay: async (d) => after(await run(sb.from('warehouse_bays').delete().eq('id', d.id), 'Bay removed')),
-  addVehicle: () => simpleForm('Add delivery vehicle', 'vehicle', `<label class="f">Name <span class="req">*</span><input id="vh-name" name="name" placeholder="e.g. Elf Truck 2"></label>
+  addVehicle: () => simpleForm('Add delivery vehicle', 'vehicle', `${termSelect('vh-term')}<label class="f">Name <span class="req">*</span><input id="vh-name" name="name" placeholder="e.g. Elf Truck 2"></label>
     <label class="f">Type<select id="vh-kind" name="kind"><option>Elf truck</option><option>Korong-korong</option><option>Other</option></select></label><label class="f">Plate no.<input id="vh-plate" name="plate_no"></label>`, 'Add vehicle'),
   csv: (d) => exportCSV(d.kind),
 };
 
 const CHG = {
   fstatus: (el) => { S.ui.status = el.value; render(); },
+  fdir: (el) => { S.ui.dir = el.value; render(); },
+  shipDir: (el) => { const d = $('#sh-dest'); if (d) d.innerHTML = destOptions(el.value); },
   period: (el) => { S.ui.period = el.value; render(); },
   confirm: async (el) => {
     const k = el.dataset.role; const on = el.checked;
     await run(sb.from('trips').update({ [`${k}_confirmed_at`]: on ? new Date().toISOString() : null, [`${k}_confirmed_by`]: on ? uid() : null }).eq('id', el.dataset.trip));
     loadAll();
   },
-  tripTruck: (el) => { const drv = el.selectedOptions[0]?.dataset.driver; if (drv) $('#tr-driver').value = drv; },
+  tripTruck: (el) => { const o = el.selectedOptions[0]; if (o?.dataset.driver) $('#tr-driver').value = o.dataset.driver; if (o?.dataset.dir) $('#tr-dir').value = o.dataset.dir; },
   checkAll: (el) => $$('input[name="sid"]', el.closest('form')).forEach((c) => { c.checked = el.checked; }),
   role: async (el) => { if (!await run(sb.from('profiles').update({ role: el.value }).eq('id', el.dataset.id), 'Role updated')) render(); else loadAll(); },
   active: async (el) => { if (!await run(sb.from('profiles').update({ active: el.checked }).eq('id', el.dataset.id), el.checked ? 'Account enabled' : 'Account disabled')) render(); else loadAll(); },
@@ -954,6 +999,9 @@ const txt = (fd, k) => String(fd.get(k) || '').trim() || null;
 const FORMS = {
   shipment: async (f, fd) => {
     if (!need(fd, [['shipper_name', 'shipper'], ['consignee_name', 'consignee']])) return;
+    const dir = fd.get('direction');
+    if (!routeFor(dir).slice(1).includes(fd.get('destination'))) { toast(`${fd.get('destination')} is not a stop going ${dirLabel(dir)}.`, 'err'); return; }
+    S.ui.lastDir = dir; try { localStorage.setItem('cj.lastDir', dir); } catch { /* storage blocked */ }
     const descs = fd.getAll('idesc'); const qtys = fd.getAll('iqty'); const units = fd.getAll('iunit'); const sizes = fd.getAll('isize'); const rates = fd.getAll('irate');
     const items = descs.map((d, i) => ({ description: d.trim(), size_package: sizes[i].trim() || null, qty: Number(qtys[i]), unit: units[i], rate: Number(rates[i] || 0) })).filter((i) => i.description || i.qty);
     if (!items.length || items.some((i) => !i.description || !(i.qty > 0))) { toast('Each item needs a description and a quantity above zero.', 'err'); return; }
@@ -963,7 +1011,7 @@ const FORMS = {
     const row = {
       shipper_name: txt(fd, 'shipper_name'), shipper_contact: txt(fd, 'shipper_contact'),
       consignee_name: txt(fd, 'consignee_name'), consignee_contact: txt(fd, 'consignee_contact'), consignee_address: txt(fd, 'consignee_address'),
-      destination: fd.get('destination'), other_charges: other, other_charges_note: txt(fd, 'other_charges_note'), declared_value: numOrNull(fd.get('declared_value')),
+      direction: dir, destination: fd.get('destination'), other_charges: other, other_charges_note: txt(fd, 'other_charges_note'), declared_value: numOrNull(fd.get('declared_value')),
       payment_terms: fd.get('payment_terms'), paid: fd.get('payment_terms') === 'Prepaid', notes: txt(fd, 'notes'),
     };
     let id = f.dataset.id;
@@ -982,12 +1030,12 @@ const FORMS = {
     if (!need(fd, [['driver', 'driver'], ['pahinante', 'pahinante']])) return;
     const dep = fd.get('planned_departure');
     const trip = await run(sb.from('trips').insert({
-      truck_id: fd.get('truck_id'), driver: txt(fd, 'driver'), pahinante: txt(fd, 'pahinante'), pahinante2: txt(fd, 'pahinante2'),
+      truck_id: fd.get('truck_id'), direction: fd.get('direction'), driver: txt(fd, 'driver'), pahinante: txt(fd, 'pahinante'), pahinante2: txt(fd, 'pahinante2'),
       planned_departure: dep ? new Date(dep).toISOString() : null, notes: txt(fd, 'notes'),
     }).select('trip_no').single());
     if (!trip) return;
     await run(sb.from('trucks').update({ status: 'Loading' }).eq('id', fd.get('truck_id')));
-    toast(`Trip ${trip.trip_no} created. Load cargo next.`);
+    toast(`Trip ${trip.trip_no} created (${dirLabel(fd.get('direction'))}). Load cargo next.`);
     await after(true);
   },
   addCargo: async (f, fd) => {
@@ -1016,6 +1064,7 @@ const FORMS = {
     await after(true);
   },
   reconcile: async (f, fd) => {
+    const trip = tripOf(f.dataset.trip); const end = endOf(dirOf(trip));
     const list = manifest(f.dataset.trip).filter((s) => s.status === 'TRANSIT');
     let issues = 0;
     for (const s of list) {
@@ -1023,13 +1072,13 @@ const FORMS = {
       if (!(q >= 0)) { toast(`Enter the received qty for ${s.tracking_no}.`, 'err'); return; }
       const ok = await run(sb.from('shipments').update({ status: 'RECEIVED', received_qty: q, received_condition: q < man && c === 'Good' ? 'Short' : c, warehouse_bay: fd.get('rb_' + s.id) || null, receiving_note: note, received_at: now(), received_by: uid() }).eq('id', s.id));
       if (!ok) return;
-      const base = { shipment_id: s.id, trip_id: s.trip_id, stage: `${finalStop()} receiving` };
+      const base = { shipment_id: s.id, trip_id: s.trip_id, stage: `${end} receiving` };
       if (q < man) { issues++; await run(sb.from('issues').insert({ ...base, kind: 'Shortage', qty_affected: man - q, description: note || `Received ${qtyFmt(q)} of ${qtyFmt(man)}` })); }
       if (q > man) { issues++; await run(sb.from('issues').insert({ ...base, kind: 'Other', qty_affected: q - man, description: note || `Over by ${qtyFmt(q - man)} pcs` })); }
       if (c === 'Damaged') { issues++; await run(sb.from('issues').insert({ ...base, kind: 'Damage', description: note || 'Damaged on arrival' })); }
-      if (s.destination !== finalStop()) { issues++; await run(sb.from('issues').insert({ ...base, kind: 'Overcarried', description: `Meant for ${s.destination}, unloaded in ${finalStop()}` })); }
+      if (s.destination !== end) { issues++; await run(sb.from('issues').insert({ ...base, kind: 'Overcarried', description: `Meant for ${s.destination}, unloaded in ${end}` })); }
     }
-    toast(`${list.length} shipments received${issues ? ` · ${issues} report${issues > 1 ? 's' : ''} logged` : ''}`);
+    toast(`${list.length} shipments received in ${end}${issues ? ` · ${issues} report${issues > 1 ? 's' : ''} logged` : ''}`);
     await after(true);
   },
   assign: async (f, fd) => {
@@ -1086,8 +1135,8 @@ const FORMS = {
     if (b && (seq === a.seq || seq === b.seq)) { toast('No room between those stops. Remove and re-add stops in order.', 'err'); return; }
     await after(await run(sb.from('route_stops').insert({ name: txt(fd, 'name'), seq, kind: 'stop' }), 'Stop added'));
   },
-  bay: async (f, fd) => { if (need(fd, [['name', 'bay name']])) await after(await run(sb.from('warehouse_bays').insert({ name: txt(fd, 'name') }), 'Bay added')); },
-  vehicle: async (f, fd) => { if (need(fd, [['name', 'name']])) await after(await run(sb.from('delivery_vehicles').insert({ name: txt(fd, 'name'), kind: fd.get('kind'), plate_no: txt(fd, 'plate_no') }), 'Vehicle added')); },
+  bay: async (f, fd) => { if (need(fd, [['name', 'bay name']])) await after(await run(sb.from('warehouse_bays').insert({ name: txt(fd, 'name'), terminal: fd.get('terminal') }), 'Bay added')); },
+  vehicle: async (f, fd) => { if (need(fd, [['name', 'name']])) await after(await run(sb.from('delivery_vehicles').insert({ name: txt(fd, 'name'), kind: fd.get('kind'), plate_no: txt(fd, 'plate_no'), terminal: fd.get('terminal') }), 'Vehicle added')); },
   myName: async (f, fd) => { await run(sb.from('profiles').update({ full_name: txt(fd, 'full_name') || '' }).eq('id', uid()), 'Name saved'); loadAll(); },
   // ---- auth ----
   signIn: async (f, fd) => {
@@ -1120,12 +1169,12 @@ function exportCSV(kind) {
   const tag = `${r.from}_to_${r.to}`;
   const tn = (id) => truckOf(id)?.code || '';
   if (kind === 'shipments') downloadCSV(`cj-shipments_${tag}.csv`, [
-    ['Tracking no', 'Registered', 'Shipper', 'Shipper contact', 'Consignee', 'Consignee contact', 'Address', 'Destination', 'Items', 'Total qty', 'Total freight', 'Payment', 'Paid', 'Status', 'Trip', 'Received qty', 'Received by (POD)', 'Delivered/released'],
-    ...r.shipments.map((s) => [s.tracking_no, fDT(s.created_at), s.shipper_name, s.shipper_contact, s.consignee_name, s.consignee_contact, s.consignee_address, s.destination, itemsText(s), qtyOf(s), s.freight_charge, s.payment_terms, s.paid ? 'Yes' : 'No', STATUS[s.status]?.[0], tripOf(s.trip_id)?.trip_no || '', s.received_qty ?? s.release_qty ?? '', s.pod_received_by || s.release_received_by || '', fDT(s.delivered_at || s.released_at)]),
+    ['Tracking no', 'Registered', 'Shipper', 'Shipper contact', 'Consignee', 'Consignee contact', 'Address', 'Direction', 'Destination', 'Items', 'Total qty', 'Total freight', 'Payment', 'Paid', 'Status', 'Trip', 'Received qty', 'Received by (POD)', 'Delivered/released'],
+    ...r.shipments.map((s) => [s.tracking_no, fDT(s.created_at), s.shipper_name, s.shipper_contact, s.consignee_name, s.consignee_contact, s.consignee_address, dirLabel(dirOf(s)), s.destination, itemsText(s), qtyOf(s), s.freight_charge, s.payment_terms, s.paid ? 'Yes' : 'No', STATUS[s.status]?.[0], tripOf(s.trip_id)?.trip_no || '', s.received_qty ?? s.release_qty ?? '', s.pod_received_by || s.release_received_by || '', fDT(s.delivered_at || s.released_at)]),
   ]);
   if (kind === 'trips') downloadCSV(`cj-trips_${tag}.csv`, [
-    ['Trip no', 'Truck', 'Driver', 'Pahinante', 'Planned departure', 'Departed', 'Arrived Vigan', 'Closed', 'Status'],
-    ...r.trips.map((t) => [t.trip_no, tn(t.truck_id), t.driver, [t.pahinante, t.pahinante2].filter(Boolean).join(' / '), fDT(t.planned_departure), fDT(t.departed_at), fDT(t.arrived_vigan_at), fDT(t.closed_at), t.status]),
+    ['Trip no', 'Direction', 'Truck', 'Driver', 'Pahinante', 'Planned departure', 'Departed', 'Arrived', 'Closed', 'Status'],
+    ...r.trips.map((t) => [t.trip_no, dirLabel(dirOf(t)), tn(t.truck_id), t.driver, [t.pahinante, t.pahinante2].filter(Boolean).join(' / '), fDT(t.planned_departure), fDT(t.departed_at), fDT(t.arrived_at), fDT(t.closed_at), t.status]),
   ]);
   if (kind === 'issues') downloadCSV(`cj-issues_${tag}.csv`, [
     ['Reported', 'Type', 'Tracking no', 'Qty', 'Description', 'Stage', 'Resolved', 'Resolution'],

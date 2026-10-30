@@ -288,3 +288,8 @@ legend { font: 700 13px var(--f-display); letter-spacing: .08em; text-transform:
 .setup ol { display: grid; gap: 8px; padding-left: 20px; }
 code { font-family: var(--f-mono); font-size: 12.5px; background: var(--gray-bg); padding: 1px 6px; border-radius: 4px; overflow-wrap: anywhere; }
 .photo { max-width: 100%; border-radius: 8px; border: 1px solid var(--line); }
+
+/* ---------- direction tag ---------- */
+.dir { display: inline-flex; align-items: center; padding: 1px 8px; border: 1px solid var(--line); border-radius: 6px; font: 600 12px/1.6 var(--f-body); color: var(--chip); background: var(--surface); white-space: nowrap; vertical-align: middle; }
+.dir.s { border-color: var(--gold); color: var(--gold-ink); background: var(--gold-soft); }
+h2 .dir { margin-left: 4px; }
