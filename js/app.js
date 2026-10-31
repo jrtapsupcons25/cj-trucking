@@ -1,4 +1,4 @@
-// CJ Trucking Services — operations web app
+// Rabara JRCJ Freight Services — operations web app
 // Static front end (GitHub Pages) + Supabase (auth, Postgres with row level security, storage, realtime).
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm';
 import {
@@ -193,7 +193,7 @@ function shell() {
   }).join('');
   return `<div class="app">
     <aside class="side">
-      <a class="brand" href="#dashboard"><span class="mark">CJ</span><span><span class="brand-name">CJ TRUCKING</span><br><span class="brand-sub">Manila – Vigan</span></span></a>
+      <a class="brand" href="#dashboard"><span class="mark">JRCJ</span><span><span class="brand-name">RABARA JRCJ</span><br><span class="brand-sub">Freight Services</span></span></a>
       <nav class="nav" aria-label="Main">${links}</nav>
       <div class="side-foot">
         <div class="managed">Managed by<strong>Emilia Rabara</strong></div>
@@ -222,7 +222,7 @@ function render() {
     return;
   }
   v.innerHTML = (VIEWS[route()] || VIEWS.dashboard)();
-  document.title = `${NAV.find((n) => n.id === route())?.label || 'Dashboard'} · CJ Trucking Services`;
+  document.title = `${NAV.find((n) => n.id === route())?.label || 'Dashboard'} · Rabara JRCJ Freight Services`;
   if (fid) { const el = document.getElementById(fid); if (el) { el.focus(); try { if (caret != null) el.setSelectionRange(caret, caret); } catch { /* select */ } } }
 }
 
@@ -1190,7 +1190,7 @@ function exportCSV(kind) {
 // Auth & setup screens
 // ---------------------------------------------------------------------------
 function authArt() {
-  return `<div class="auth-art"><div class="brand" style="padding:0"><span class="mark">CJ</span><span><span class="brand-name">CJ TRUCKING SERVICES</span><br><span class="brand-sub">Managed by Emilia Rabara</span></span></div>
+  return `<div class="auth-art"><div class="brand" style="padding:0"><span class="mark">JRCJ</span><span><span class="brand-name">RABARA JRCJ FREIGHT SERVICES</span><br><span class="brand-sub">Managed by Emilia Rabara</span></span></div>
     <div style="display:grid;gap:18px"><div class="auth-route"><span>Manila</span><i></i><span>Vigan</span></div>
       <h1>Every shipment, every truck, from loading to proof of delivery.</h1>
       <p>Register cargo, sign off manifests, record releases on the road, reconcile in Vigan and track the fleet. One record for the whole team.</p></div>
@@ -1232,7 +1232,7 @@ function pendingView() {
     <div class="actions"><button class="btn" data-act="reload">Check again</button><button class="btn" data-act="signOut">Sign out</button></div></div></div></div>`;
 }
 function setupView() {
-  return `<div class="setup"><div class="brand" style="color:var(--ink)"><span class="mark">CJ</span><span><span class="brand-name" style="color:var(--ink)">CJ TRUCKING SERVICES</span></span></div>
+  return `<div class="setup"><div class="brand" style="color:var(--ink)"><span class="mark">JRCJ</span><span><span class="brand-name" style="color:var(--ink)">RABARA JRCJ FREIGHT SERVICES</span></span></div>
     <h1>Connect the database</h1>
     <p>This copy of the app isn't connected to Supabase yet.</p>
     <ol><li>In Supabase, open <strong>SQL Editor</strong>, paste the contents of <code>supabase/schema.sql</code> and run it.</li>

@@ -1,6 +1,6 @@
-# CJ Trucking Services — Operations System
+# Rabara JRCJ Freight Services — Operations System
 
-Web app for CJ Trucking Services' Manila ⇄ Vigan freight operations, in both directions. Managed by Emilia Rabara.
+Web app for Rabara JRCJ Freight Services' Manila ⇄ Vigan freight operations, in both directions. Managed by Emilia Rabara.
 
 **Modules:** Dashboard · Shipments / freight · Dispatch & loading · En-route releases (intermediate unloading) · Vigan receiving · Delivery (Elf truck / korong-korong, proof of delivery) · Fleet (5 ten-wheelers, schedule, maintenance & repair history) · Reports (CSV export) · Users & settings (staff roles, crew, route stops, warehouse bays, delivery vehicles).
 

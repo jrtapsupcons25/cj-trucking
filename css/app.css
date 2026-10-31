@@ -81,7 +81,7 @@ a { color: var(--blue); }
 .brand { display: flex; align-items: center; gap: 12px; padding: 0 6px; text-decoration: none; color: #fff; }
 .mark {
   width: 44px; height: 44px; border-radius: 9px; background: var(--gold); color: var(--on-gold);
-  display: grid; place-items: center; font: 800 19px/1 var(--f-display); letter-spacing: .02em; flex: none;
+  display: grid; place-items: center; font: 800 15px/1 var(--f-display); letter-spacing: 0; flex: none;
 }
 .brand-name { font: 700 17px/1.05 var(--f-display); letter-spacing: .06em; }
 .brand-sub { font-size: 11px; letter-spacing: .14em; color: var(--side-ink); text-transform: uppercase; }
