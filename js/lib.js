@@ -101,3 +101,24 @@ export function armed(btn) {
   setTimeout(() => { if (document.contains(btn)) { btn.removeAttribute('data-armed'); btn.innerHTML = label; } }, 4000);
   return false;
 }
+
+// Rabara JRCJ Freight Services badge, drawn from the logo on the truck doors.
+// Colours are fixed (it is the company mark, the same in light and dark mode).
+let logoN = 0;
+const star = (cx, cy) => Array.from({ length: 10 }, (_, i) => {
+  const r = i % 2 ? 3.2 : 7.6; const a = (-90 + i * 36) * Math.PI / 180;
+  return `${(cx + r * Math.cos(a)).toFixed(1)},${(cy + r * Math.sin(a)).toFixed(1)}`;
+}).join(' ');
+export function logo(size = 56, label = 'Rabara JRCJ Freight Services') {
+  const n = ++logoN;
+  return `<svg class="logo" width="${size}" height="${size}" viewBox="0 0 200 200" role="img" aria-label="${esc(label)}">
+    <defs><path id="lgt${n}" d="M 36 100 A 64 64 0 0 1 164 100"/><path id="lgb${n}" d="M 19 100 A 81 81 0 0 0 181 100"/></defs>
+    <circle cx="100" cy="100" r="99" fill="#6B4A94"/>
+    <circle cx="100" cy="100" r="90" fill="none" stroke="#F3B897" stroke-width="4.5"/>
+    <circle cx="100" cy="100" r="57" fill="none" stroke="#F3B897" stroke-width="4.5"/>
+    <text font-family="'Stardos Stencil', Georgia, serif" font-weight="700" font-size="29" fill="#FFFFFF" letter-spacing="3"><textPath href="#lgt${n}" startOffset="50%" text-anchor="middle">RABARA</textPath></text>
+    <text font-family="'Barlow Semi Condensed', 'Arial Narrow', sans-serif" font-weight="700" font-size="21" fill="#F3B897" letter-spacing="2"><textPath href="#lgb${n}" startOffset="50%" text-anchor="middle">FREIGHT SERVICES</textPath></text>
+    <polygon points="${star(27.5, 92)}" fill="#FFFFFF"/><polygon points="${star(172.5, 92)}" fill="#FFFFFF"/>
+    <text x="100" y="123" text-anchor="middle" font-family="'Stardos Stencil', Georgia, serif" font-weight="700" font-size="64" fill="#FFFFFF" stroke="#16101F" stroke-width="2.4" paint-order="stroke" textLength="88" lengthAdjust="spacingAndGlyphs">JRCJ</text>
+  </svg>`;
+}

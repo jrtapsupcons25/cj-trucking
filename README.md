@@ -46,7 +46,7 @@ Every status change is logged with who did it and when. Shortages, damage and ov
 
 ```
 index.html          app shell
-css/app.css         design (navy, white and gold; light and dark mode)
+css/app.css         design (JRCJ badge purple and peach, truck-livery stripe; light and dark mode)
 js/config.js        Supabase URL and publishable key
 js/app.js           screens, workflow and data access
 js/lib.js           formatting, icons, dialogs, CSV export

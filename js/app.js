@@ -3,7 +3,7 @@
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm';
 import {
   TZ, esc, $, $$, peso, qtyFmt, fDate, fDT, todayISO, nowLocalInput, toLocalInput, daysUntil,
-  pill, ICON, toast, openModal, closeModal, modalOpen, downloadCSV, armed,
+  pill, ICON, logo, toast, openModal, closeModal, modalOpen, downloadCSV, armed,
 } from './lib.js';
 
 // ---------------------------------------------------------------------------
@@ -193,7 +193,8 @@ function shell() {
   }).join('');
   return `<div class="app">
     <aside class="side">
-      <a class="brand" href="#dashboard"><span class="mark">JRCJ</span><span><span class="brand-name">RABARA JRCJ</span><br><span class="brand-sub">Freight Services</span></span></a>
+      <a class="brand" href="#dashboard">${logo(56)}<span><span class="brand-name">RABARA JRCJ</span><br><span class="brand-sub">Freight Services</span></span></a>
+      <div class="livery" aria-hidden="true"></div>
       <nav class="nav" aria-label="Main">${links}</nav>
       <div class="side-foot">
         <div class="managed">Managed by<strong>Emilia Rabara</strong></div>
@@ -481,7 +482,7 @@ VIEWS.delivery = () => {
     </section>
     <div class="grid3">${vehicles.map((v) => {
       const list = out.filter((s) => s.delivery_vehicle === v);
-      return `<section class="card"><div class="card-h"><div><h2>${esc(v)}</h2><p>${esc(vterm(v))} · ${list.length} out for delivery</p></div>${ICON.delivery.replace('<svg', '<svg style="width:26px;height:26px;color:var(--gold-ink)"')}</div>
+      return `<section class="card"><div class="card-h"><div><h2>${esc(v)}</h2><p>${esc(vterm(v))} · ${list.length} out for delivery</p></div>${ICON.delivery.replace('<svg', '<svg style="width:26px;height:26px;color:var(--accent-ink)"')}</div>
         ${list.length ? list.map((s) => `<div class="lane"><div class="lane-top"><span class="grow"><span class="mono">${esc(s.tracking_no)}</span> <strong>${esc(s.consignee_name)}</strong><span class="sub muted small">${esc(s.consignee_address || '')} · ${qtyFmt(s.received_qty ?? qtyOf(s))} pcs · crew ${esc(s.delivery_crew || '—')}</span></span></div>
           ${can('deliver') ? `<div class="actions"><button class="btn sm primary" data-act="pod" data-mode="deliver" data-id="${s.id}">Record delivery</button><button class="btn sm" data-act="backToWh" data-id="${s.id}" data-confirm="Tap again to return">Return to warehouse</button></div>` : ''}</div>`).join('')
         : '<div class="card-b muted">No deliveries assigned.</div>'}</section>`;
@@ -1190,10 +1191,11 @@ function exportCSV(kind) {
 // Auth & setup screens
 // ---------------------------------------------------------------------------
 function authArt() {
-  return `<div class="auth-art"><div class="brand" style="padding:0"><span class="mark">JRCJ</span><span><span class="brand-name">RABARA JRCJ FREIGHT SERVICES</span><br><span class="brand-sub">Managed by Emilia Rabara</span></span></div>
+  return `<div class="auth-art"><div class="livery" aria-hidden="true"></div>
+    <div class="auth-badge">${logo(132)}<div><span class="brand-name">RABARA JRCJ</span><br><span class="brand-sub">Freight Services · Managed by Emilia Rabara</span></div></div>
     <div style="display:grid;gap:18px"><div class="auth-route"><span>Manila</span><i></i><span>Vigan</span></div>
       <h1>Every shipment, every truck, from loading to proof of delivery.</h1>
-      <p>Register cargo, sign off manifests, record releases on the road, reconcile in Vigan and track the fleet. One record for the whole team.</p></div>
+      <p>Register cargo, sign off manifests, record releases on the road, reconcile at the terminal and track the fleet. One record for the whole team, in both directions.</p></div>
     <p class="small" style="margin:0">Staff access only.</p></div>`;
 }
 function authView() {
@@ -1232,7 +1234,7 @@ function pendingView() {
     <div class="actions"><button class="btn" data-act="reload">Check again</button><button class="btn" data-act="signOut">Sign out</button></div></div></div></div>`;
 }
 function setupView() {
-  return `<div class="setup"><div class="brand" style="color:var(--ink)"><span class="mark">JRCJ</span><span><span class="brand-name" style="color:var(--ink)">RABARA JRCJ FREIGHT SERVICES</span></span></div>
+  return `<div class="setup"><div class="brand" style="color:var(--ink)">${logo(64)}<span><span class="brand-name" style="color:var(--ink)">RABARA JRCJ FREIGHT SERVICES</span></span></div>
     <h1>Connect the database</h1>
     <p>This copy of the app isn't connected to Supabase yet.</p>
     <ol><li>In Supabase, open <strong>SQL Editor</strong>, paste the contents of <code>supabase/schema.sql</code> and run it.</li>
